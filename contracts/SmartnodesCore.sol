@@ -4,241 +4,198 @@ pragma solidity ^0.8.5;
 import "@openzeppelin-upgradeable/contracts/token/ERC20/ERC20Upgradeable.sol";
 import "./interfaces/ISmartnodesMultiSig.sol";
 
-/**
- * @title SmartNodes
- * @dev An ERC20 contract for managing off-chain networks
- */
 contract SmartnodesCore is ERC20Upgradeable {
-    // Validator multi-sig address
-    ISmartnodesMultiSig private _validatorContractInstance;
-    address public validatorContractAddress;
+    ISmartnodesMultiSig public validatorContract;
+    address public proxyAdmin;
 
-    // Counters for storage indexing / IDs
-    uint256 public validatorIdCounter;
-    uint256 public userCounter;
-    uint256 public jobCounter;
-    uint256 public activeValidators;
-    uint256 public minValidators;
-    uint256 public maxValidators;
+    uint256 public tailEmission = 8e18;
+    uint256 public constant UNLOCK_PERIOD = 1_209_600; // 14 days in seconds
 
-    // Events
-    event TokensLocked(address indexed validator, uint256 amount);
-    event UnlockInitiated(address indexed validator, uint256 unlockTime);
-    event TokensUnlocked(address indexed validator, uint256 amount);
-    event JobRequested(
-        bytes32 indexed jobHash,
-        uint256 timestamp,
-        address[] seedValidators
-    );
-    event JobCompleted(bytes32 indexed jobId, uint256 timestamp);
-    event JobDisputed(bytes32 indexed jobId, uint256 timestamp);
+    uint256 public emissionRate;
+    uint256 public lockAmount;
+    uint256 public halvingPeriod;
+    uint256 public statesSinceLastHalving;
+    uint256 public totalLocked;
+    uint256 public unlockPeriod;
 
-    // User data with key information (address, RSA key hash, reputation)
-    struct User {
-        address userAddress;
-        bytes32 publicKeyHash;
-        uint8 reputation;
-    }
-
-    // Validator data with key information (address, RSA key hash, locked value, reputation, activity)
     struct Validator {
-        bytes32 publicKeyHash;
-        address validatorAddress;
+        address _address;
         uint256 locked;
         uint256 unlockTime;
-        uint8 reputation;
+        bytes32 publicKeyHash;
     }
 
-    // Information for  a generic off-chain job (job hash [key for kademlia lookup], seed validators, participants, author, etc)
     struct Job {
-        address author;
-        address[] seedValidators;
-        address[] workers;
         uint256[] capacities;
-        bool activity;
+        uint256 payment;
     }
 
-    // ERC20 token supply metrics
-    uint256 constant TAIL_EMISSION = 2e18;
-
-    uint256 public halving; // number of state updates until next halving (~3 months)
-    uint256 public emissionRate; // amount of tokens to be emitted per state update
-    uint256 public lockAmount; // minimum validator locked tokens required
-    uint256 public unlockPeriod;
-    uint256 public timeSinceLastHalving;
-
-    // Main datastructure mappings via id lookup
-    mapping(bytes32 => User) public users;
-    mapping(bytes32 => address) public workers;
-    mapping(bytes32 => address) public validatorAddressByHash;
+    mapping(bytes32 => uint256) public jobHashToId;
+    mapping(uint256 => Job) public jobs;
     mapping(uint256 => Validator) public validators;
-    mapping(bytes32 => Job) public jobs;
-    uint256[] public activeJobs;
-
-    // Helpful mappings
-    mapping(address => bytes32) public userHashByAddress;
     mapping(address => uint256) public validatorIdByAddress;
+
+    uint256 public jobCounter;
+    uint256 public userCounter;
+    uint256 public validatorCounter;
+    uint256 public availableCapacity;
+
+    event TokensLocked(address validator, uint256 amount);
+    event UnlockInitiated(address indexed validator, uint256 unlockTime);
+    event TokensUnlocked(address indexed validator, uint256 amount);
+    event JobRequested(uint256 jobId, bytes32 jobHash, bytes32 userHash);
+    event JobCompleted(uint256 indexed jobId, bytes32 jobHash);
+    event JobDisputed(bytes32 indexed jobId, uint256 timestamp);
 
     modifier onlyValidatorMultiSig() {
         require(
-            msg.sender == validatorContractAddress,
+            msg.sender == address(validatorContract),
             "Caller must be the SmartnodesMultiSig."
         );
         _;
     }
 
+    modifier onlyProxyAdmin() {
+        require(msg.sender == proxyAdmin, "Caller must be the proxy admin.");
+        _;
+    }
+
     function initialize(address[] memory _genesisNodes) public initializer {
         __ERC20_init("Smartnodes", "SNO");
+        proxyAdmin = msg.sender;
+        emissionRate = 2048e18;
+        lockAmount = 100_000e18;
+        halvingPeriod = 8742;
+        statesSinceLastHalving = 0;
+        unlockPeriod = 1_209_600; // (14 days in seconds)
 
-        // Set all counters to 1 (when looking up values, 0 = Not found)
-        userCounter = 1;
         jobCounter = 1;
-        validatorIdCounter = 1;
-
-        // Set ERC20 token parameters
-        emissionRate = 256e18; // amount of tokens to be emitted per state update
-        lockAmount = 100_000e18; // minimum validator locked tokens required
-        halving = 52452222; // Number of state updates before reward halving
-        unlockPeriod = 1_209_600; // (seconds)
-        timeSinceLastHalving = 0;
+        validatorCounter = 1;
+        userCounter = 1;
 
         for (uint i = 0; i < _genesisNodes.length; i++) {
             _mint(_genesisNodes[i], lockAmount);
         }
-
-        // Other parameters
-        minValidators = 1;
-        maxValidators = 5;
     }
 
-    function setValidatorContract(address validatorAddress) external {
+    function setValidatorContract(address _validatorAddress) external {
         require(
-            validatorContractAddress == address(0),
+            address(validatorContract) == address(0),
             "Validator address already set."
         );
-        _validatorContractInstance = ISmartnodesMultiSig(validatorAddress);
-        validatorContractAddress = validatorAddress;
+        validatorContract = ISmartnodesMultiSig(_validatorAddress);
     }
 
-    /**
-     * @dev Create a User, limit one per address & public key hash (RSA)
-     */
-    function createUser(bytes32 _publicKeyHash) public {
-        // Only one address & public key hash per user.
-        require(
-            userHashByAddress[msg.sender] == bytes32(0),
-            "User already registered."
-        );
-
-        users[_publicKeyHash] = User({
-            userAddress: msg.sender,
-            publicKeyHash: _publicKeyHash,
-            reputation: 50
-        });
-
-        userHashByAddress[msg.sender] = _publicKeyHash;
-        userCounter++;
+    function halveStateTime() external onlyProxyAdmin {
+        // By reducing the state time in half, we must reduce emissions (ie. state reward)
+        // by half, including the tail emission value
+        tailEmission /= 2;
+        emissionRate /= 2;
+        halvingPeriod *= 2; // Double the state updates requied between halvings
+        validatorContract.halvePeriod(); // Halve the time required between state updates
     }
 
-    /**
-     * @dev Create a Validator, limit one per address & public key hash (RSA), requires locking up sno
-     */
-    function createValidator(
-        bytes32 _publicKeyHash,
-        uint256 _lockAmount
-    ) external {
-        require(
-            validatorIdByAddress[msg.sender] == 0,
-            "Validator already exists."
-        );
-
-        require(
-            balanceOf(msg.sender) >= _lockAmount && _lockAmount >= lockAmount,
-            "Insufficient token balance."
-        );
-
-        // Create validator on SmartnodesCore
-        validators[validatorIdCounter] = Validator({
-            publicKeyHash: _publicKeyHash,
-            validatorAddress: msg.sender,
-            locked: lockAmount,
-            unlockTime: 0,
-            reputation: 50
-        });
-
-        validatorIdByAddress[msg.sender] = validatorIdCounter;
-        validatorAddressByHash[_publicKeyHash] = msg.sender;
-
-        // Lock token in contract
-        _lockTokens(msg.sender, lockAmount);
-
-        validatorIdCounter++;
-    }
-
-    // User Job Requesting Via Chainlink VRF TODO
+    // Request a job and associate a payment with it
     function requestJob(
         bytes32 userHash,
         bytes32 jobHash,
-        uint256[] calldata _capacities
-    ) external returns (uint256[] memory validatorIds) {
-        // If user directly requests a job, register if they have not already done so
-        if (msg.sender != validatorContractAddress) {
-            if (userHashByAddress[msg.sender] == bytes32(0)) {
-                createUser(userHash);
-                userHash = userHashByAddress[msg.sender];
+        uint256[] calldata capacities,
+        uint256 paymentAmount // Accept payment in tokens
+    ) external {
+        require(jobHashToId[jobHash] == 0, "Job already created!");
+        require(capacities.length > 0, "Job must have a capacity.");
+        jobHashToId[jobHash] = jobCounter;
+
+        // Require a payment for the job
+        require(paymentAmount > 0, "Payment must be greater than zero.");
+        require(
+            balanceOf(msg.sender) >= paymentAmount,
+            "Insufficient token balance."
+        );
+        require(capacities.length > 0, "");
+
+        // Transfer the payment tokens and burn them
+        _transfer(msg.sender, address(0), paymentAmount); // Burn the tokens by sending to zero address
+
+        // Store the job with associated payment
+        jobs[jobCounter] = Job({
+            capacities: capacities,
+            payment: paymentAmount // Store the payment amount
+        });
+
+        emit JobRequested(jobCounter, jobHash, userHash);
+        jobCounter++;
+    }
+
+    // Complete the job and distribute payment to validators/workers
+    function completeJob(
+        bytes32 jobHash
+    ) external onlyValidatorMultiSig returns (uint256) {
+        uint256 jobId = jobHashToId[jobHash];
+
+        // If we have a user-requested job
+        if (jobId == 0) {
+            // If not, we can log the job counter
+            jobCounter++;
+            emit JobCompleted(jobId, jobHash);
+            return 0;
+        }
+
+        // Get the job and calculate reward
+        Job memory job = jobs[jobId];
+        uint256 totalReward = job.payment;
+
+        // Cleanup
+        delete jobs[jobId];
+        delete jobHashToId[jobHash];
+        emit JobCompleted(jobId, jobHash);
+        return totalReward;
+    }
+
+    function mintTokens(
+        address[] memory _workers,
+        uint256[] memory _capacities,
+        uint256 _totalCapacity,
+        address[] memory _validatorsVoted,
+        uint256 additionalReward
+    ) external onlyValidatorMultiSig {
+        if (statesSinceLastHalving >= halvingPeriod) {
+            if (emissionRate > tailEmission) {
+                emissionRate /= 2;
             }
         }
 
-        require(userHash != bytes32(0), "User not registered!");
-        require(jobs[jobHash].author == address(0), "Job already created.");
-        // require(_capacities[0] > 0, "Capacity must be greater zero.");
+        uint256 validatorReward;
+        uint256 workerReward;
 
-        address[] memory _seedValidators = _validatorContractInstance
-            .generateValidators(1);
-        uint256[] memory _validatorIds = new uint256[](1); // (_seedValidators.length);
-
-        for (uint256 i = 0; i < _seedValidators.length; i++) {
-            _validatorIds[i] = validatorIdByAddress[_seedValidators[i]];
+        if (_workers.length == 0) {
+            validatorReward = emissionRate + additionalReward;
+            workerReward = 0;
+        } else {
+            validatorReward = ((emissionRate + additionalReward) * 25) / 100;
+            workerReward = ((emissionRate + additionalReward) * 75) / 100;
         }
 
-        // Store the job in the jobs mapping
-        jobs[jobHash] = Job({
-            author: msg.sender,
-            seedValidators: _seedValidators,
-            workers: new address[](_capacities.length),
-            capacities: _capacities,
-            activity: true
-        });
+        for (uint256 v = 0; v < _validatorsVoted.length; v++) {
+            _mint(
+                _validatorsVoted[v],
+                validatorReward / _validatorsVoted.length
+            );
+        }
 
-        emit JobRequested(jobHash, block.timestamp, _seedValidators);
-        jobCounter++;
+        if (_workers.length > 0) {
+            for (uint256 w = 0; w < _workers.length; w++) {
+                uint256 reward = ((_capacities[w] * workerReward) /
+                    _totalCapacity);
+                _mint(_workers[w], reward);
+            }
+        }
 
-        return _validatorIds;
-    }
-
-    function completeJob(
-        bytes32 jobHash,
-        address[] memory _workers
-    ) external onlyValidatorMultiSig returns (uint256[] memory) {
-        require(_workers.length == jobs[jobHash].capacities.length);
-
-        jobs[jobHash].workers = _workers;
-        jobs[jobHash].activity = false;
-        // jobIdByUserHash[userIdHash] = 0;
-
-        emit JobCompleted(jobHash, block.timestamp);
-
-        return jobs[jobHash].capacities;
-    }
-
-    function disputeJob(bytes32 jobHash) external onlyValidatorMultiSig {
-        Job storage job = jobs[jobHash];
-        job.activity = false;
-        emit JobDisputed(jobHash, block.timestamp);
+        statesSinceLastHalving++;
     }
 
     /**
-     * @dev Internal function to lock tokens, callable from other functions
+     * @dev Validator token unlocking, 14 day withdrawal period.
      */
     function _lockTokens(address sender, uint256 amount) internal {
         require(amount > 0, "Amount must be greater than zero.");
@@ -249,14 +206,11 @@ contract SmartnodesCore is ERC20Upgradeable {
 
         transferFrom(sender, address(this), amount);
         validators[validatorId].locked += amount;
-        uint256 totalLocked = validators[validatorId].locked;
+        totalLocked += amount;
 
         emit TokensLocked(sender, amount);
     }
 
-    /**
-     * @dev Validator token unlocking, 30 day withdrawal period.
-     */
     function lockTokens(uint256 amount) external {
         _lockTokens(msg.sender, amount);
     }
@@ -275,7 +229,7 @@ contract SmartnodesCore is ERC20Upgradeable {
             validator.unlockTime = block.timestamp + unlockPeriod; // unlocking period
 
             // Update multisig validator
-            uint256 totalLocked = validator.locked - amount;
+            totalLocked -= amount;
 
             emit UnlockInitiated(msg.sender, validator.unlockTime); // Optional: emit an event
         } else {
@@ -286,115 +240,55 @@ contract SmartnodesCore is ERC20Upgradeable {
             );
 
             validator.locked -= amount;
-            _mint(msg.sender, amount); // Mint tokens back to the validator's address
+            transferFrom(address(this), msg.sender, amount); // Mint tokens back to the validator's address
 
             emit TokensUnlocked(msg.sender, amount); // Optional: emit an event when tokens are unlocked
         }
     }
 
-    /**
-     * @dev Mint tokens for updating state rewards, distribute 40/60 among validators and workers
-     * Updates the emission rate and halving accordingly
-     */
-    function mintTokens(
-        address[] memory _workers,
-        uint256[] memory _workerCapacities,
-        uint256 _totalCapacity,
-        address[] memory _validatorsVoted
-    ) external onlyValidatorMultiSig {
-        if (timeSinceLastHalving >= halving) {
-            if (emissionRate > TAIL_EMISSION) {
-                emissionRate /= 2;
-            }
-        }
+    function createValidator(
+        bytes32 _publicKeyHash,
+        uint256 _lockAmount
+    ) external {
+        require(
+            balanceOf(msg.sender) >= _lockAmount && _lockAmount >= lockAmount,
+            "Insufficient token balance."
+        );
+        require(
+            validatorIdByAddress[msg.sender] == 0,
+            "Validator already created with this account!"
+        );
 
-        uint256 validatorRewardTotal = (emissionRate * 20) / 100;
-        uint256 workerRewardTotal = (emissionRate * 80) / 100;
+        validators[validatorCounter] = Validator({
+            _address: msg.sender,
+            locked: 0,
+            unlockTime: 0,
+            publicKeyHash: _publicKeyHash
+        });
 
-        // Distribute rewards for validators equally
-        uint256 validatorReward = validatorRewardTotal /
-            _validatorsVoted.length;
+        validatorIdByAddress[msg.sender] = validatorCounter;
+        _lockTokens(msg.sender, lockAmount);
 
-        for (uint256 v = 0; v < _validatorsVoted.length; v++) {
-            _mint(_validatorsVoted[v], validatorReward);
-        }
-
-        // Distribute rewards for workers
-        for (uint256 w = 0; w < _workers.length; w++) {
-            uint256 reward = ((_workerCapacities[w] * workerRewardTotal) /
-                _totalCapacity);
-            _mint(_workers[w], reward);
-        }
-
-        timeSinceLastHalving++;
+        validatorCounter++;
     }
 
-    // Returns a list of all the selected validators for a job request
-    function getJobValidators(
-        bytes32 jobHash
-    ) external view returns (address[] memory) {
-        address[] memory jobValidators = jobs[jobHash].seedValidators;
-        return jobValidators;
+    function isLocked(address validatorAddress) external view returns (bool) {
+        uint256 id = validatorIdByAddress[validatorAddress];
+        return validators[id].locked >= lockAmount;
+    }
+
+    function getActiveValidatorCount() external view returns (uint256) {
+        return validatorContract.getNumValidators();
     }
 
     function getValidatorInfo(
         uint256 _validatorId
     ) external view returns (bool, bytes32, address) {
-        require(_validatorId < validatorIdCounter, "Invalid ID.");
+        require(_validatorId < validatorCounter, "Invalid ID.");
         Validator memory _validator = validators[_validatorId];
-        bool isActive = _validatorContractInstance.isActiveValidator(
-            _validator.validatorAddress
+        bool isActive = validatorContract.isActiveValidator(
+            _validator._address
         );
-        return (
-            isActive,
-            _validator.publicKeyHash,
-            _validator.validatorAddress
-        );
-    }
-
-    function getValidatorBytes(
-        address validatorAddress
-    ) external view returns (bytes32) {
-        uint256 validatorId = validatorIdByAddress[validatorAddress];
-        require(validatorId > 0, "Validator does not exist.");
-
-        return validators[validatorId].publicKeyHash;
-    }
-
-    function getUserCount() external view returns (uint256) {
-        return userCounter - 1;
-    }
-
-    function getValidatorCount() external view returns (uint256) {
-        return validatorIdCounter - 1;
-    }
-
-    function getActiveValidatorCount() external view returns (uint256) {
-        return _validatorContractInstance.getNumValidators();
-    }
-
-    function getEmissionRate() external view returns (uint256) {
-        return emissionRate;
-    }
-
-    function getSupply() external view returns (uint256) {
-        return this.totalSupply();
-    }
-
-    function isLocked(address validatorAddr) external view returns (bool) {
-        uint256 _id = validatorIdByAddress[validatorAddr];
-        return validators[_id].locked >= lockAmount;
-    }
-
-    function getProposees() external view returns (address[] memory) {
-        return _validatorContractInstance.getSelectedValidators();
-    }
-
-    function getState()
-        external
-        view
-        returns (uint256, uint256, uint256, address[] memory)
-    {
-        return _validatorContractInstance.getState();
+        return (isActive, _validator.publicKeyHash, _validator._address);
     }
 }

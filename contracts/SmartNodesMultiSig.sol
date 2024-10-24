@@ -4,9 +4,6 @@ pragma solidity ^0.8.5;
 import "@openzeppelin-upgradeable/contracts/proxy/utils/Initializable.sol";
 import "@openzeppelin-upgradeable/contracts/interfaces/IERC20Upgradeable.sol";
 import "./interfaces/ISmartnodesCore.sol";
-import "@chainlink/contracts/src/v0.8/vrf/dev/VRFConsumerBaseV2Upgradeable.sol";
-import "@chainlink/contracts/src/v0.8/interfaces/VRFCoordinatorV2Interface.sol";
-import {VRFV2PlusClient} from "@chainlink/contracts/src/v0.8/vrf/dev/libraries/VRFV2PlusClient.sol";
 
 /** 
     * @title SmartnodesMultiSig
@@ -14,74 +11,54 @@ import {VRFV2PlusClient} from "@chainlink/contracts/src/v0.8/vrf/dev/libraries/V
      managing the Core contract
 */
 contract SmartnodesMultiSig is Initializable {
-    enum FunctionType {
-        DeactivateValidator,
-        CreateJob,
-        CompleteJob
-        // DisputeJob
-    }
-
     // Proposal for a Smartnodes Update
     struct Proposal {
-        uint256 id;
-        FunctionType[] functionTypes;
-        bytes[] data;
-        bool executed;
+        address[] validatorsToRemove;
+        bytes32[] jobHashes;
+        uint256[] allCapacities;
+        address[] workers;
+        uint256 totalCapacity;
     }
 
-    // Chainlink VRF Parameters
-    // uint64 s_subscriptionId;
-    // address linkAddress = 0x779877A7B0D9E8603169DdbD7836e478b4624789;
-    // bytes32 s_keyHash =
-    //     0x787d74caea10b2b357790d5b5247c2f63d1d91572a9846f780606e4d953677ae;
-    // uint32 callbackGasLimit = 100000;
-    // uint16 requestConfirmations = 2;
-    // uint32 numWords = 1;
-    // address vrfCoordinator;
-    // VRFCoordinatorV2Interface COORDINATOR;
-
     // State update constraints
-    uint256 public constant UPDATE_TIME = 300; // 5 minutes minimum required between state updates
+    uint256 public updateTime = 3600; // 60 minutes minimum required between state updates
     uint256 public requiredApprovalsPercentage;
     uint256 public requiredApprovals;
     uint256 public maxStateUpdates; // Maximum number of function calls per proposal
     uint256 public lastProposalTime; // time of last proposal
+    uint256 public nextProposalId;
 
     // Metadata and bytecode for SmartNodes calls
     ISmartnodesCore private _smartnodesContractInstance;
     address public smartnodesContractAddress;
 
     // Counters for storage indexing / IDs
-    uint256 public randomRequestId;
-    uint256 public nextProposalId;
     uint8 public nValidators;
-
     address[] public validators;
     address[] public currentRoundValidators;
-    Proposal[] public currentProposals;
+    bytes32[] public currentProposals;
 
     mapping(address => bool) public isValidator; // For quick validator checks
-    mapping(uint256 => Proposal) public proposals;
-    mapping(address => bool) public hasSubmittedProposal;
-    mapping(address => mapping(uint8 => bool)) public votes;
-    mapping(uint8 => uint256) public numVotes;
+    mapping(address => uint8) public hasSubmittedProposal;
+    mapping(address => uint8) public hasVoted;
+    mapping(uint8 => uint256) public proposalVotes;
 
     event ProposalCreated(
-        uint256 proposalId,
+        uint256 proposalRound,
         uint8 proposalNum,
-        bytes32 validatorId
+        bytes32 proposalHash,
+        address validator
     );
-    event Voted(uint256 proposalId, address validator);
+    event ProposalReady(uint256 proposalId, uint8 proposalNum);
     event ProposalExecuted(uint256 proposalId);
     event Deposit(address indexed sender, uint amount);
     event ValidatorAdded(address validator);
     event ValidatorRemoved(address validator);
-    event RewardDistributed(address reciever, uint256 amount);
 
     modifier onlyValidator() {
         require(
             isValidator[msg.sender],
-            "Caller is not a Smart Nodes Validator!"
+            "Caller is not a Smartnodes Validator!"
         );
         _;
     }
@@ -101,7 +78,7 @@ contract SmartnodesMultiSig is Initializable {
             "Caller is not a selected validator for this round!"
         );
         require(
-            !hasSubmittedProposal[msg.sender],
+            hasSubmittedProposal[msg.sender] == 0,
             "Validator has already submitted a proposal this round!"
         );
         _;
@@ -115,16 +92,17 @@ contract SmartnodesMultiSig is Initializable {
         // uint64 _subscriptionId
         initializer
     {
-        // __VRFConsumerBaseV2_init(_vrfCoordinator);
-        // COORDINATOR = VRFCoordinatorV2Interface(_vrfCoordinator);
-
         smartnodesContractAddress = target;
+
         maxStateUpdates = 30;
+        updateTime = 0;
+
         _smartnodesContractInstance = ISmartnodesCore(target);
+
         lastProposalTime = 0; // time of last proposal
-        requiredApprovalsPercentage = 65;
+        requiredApprovalsPercentage = 66;
         nValidators = 1;
-        // s_subscriptionId = _subscriptionId;
+        nextProposalId = 0;
     }
 
     receive() external payable {
@@ -133,39 +111,25 @@ contract SmartnodesMultiSig is Initializable {
 
     /**
      * @notice Creates a new proposal, to update all the essential data structures given some aggregated off-chain state.
-     * @param _functionTypes The types of functions to be called in the proposal
-     * @param _data The call data for the proposal
      */
     function createProposal(
-        FunctionType[] memory _functionTypes,
-        bytes[] memory _data
+        bytes32 proposalHash
     ) external onlySelectedValidator {
         require(
-            block.timestamp - lastProposalTime >= UPDATE_TIME,
+            block.timestamp - lastProposalTime >= updateTime,
             "Proposals must be submitted 0-10 mins after since last executed proposal!"
         );
 
-        require(
-            _functionTypes.length == _data.length,
-            "Function types and data length must match!"
-        );
+        currentProposals.push(proposalHash);
+        uint8 proposalNum = uint8(currentProposals.length);
+        hasSubmittedProposal[msg.sender] = proposalNum;
 
-        Proposal memory proposal = Proposal({
-            id: nextProposalId,
-            functionTypes: _functionTypes,
-            data: _data,
-            executed: false
-        });
-
-        currentProposals.push(proposal);
-        uint8 proposalNum = uint8(currentProposals.length) - 1;
-        hasSubmittedProposal[msg.sender] = true;
-
-        bytes32 validatorId = _smartnodesContractInstance.getValidatorBytes(
+        emit ProposalCreated(
+            nextProposalId,
+            proposalNum,
+            proposalHash,
             msg.sender
         );
-
-        emit ProposalCreated(nextProposalId, proposalNum, validatorId);
     }
 
     /**
@@ -174,12 +138,9 @@ contract SmartnodesMultiSig is Initializable {
      * @param proposalNum The ID of the current round proposal
      */
     function approveTransaction(uint8 proposalNum) external onlyValidator {
+        require(hasVoted[msg.sender] == 0, "Validator has already voted!");
         require(
-            !votes[msg.sender][proposalNum],
-            "Validator has already voted!"
-        );
-        require(
-            currentProposals.length >= proposalNum,
+            currentProposals.length >= proposalNum && proposalNum > 0,
             "Invalid proposal number!"
         );
 
@@ -187,123 +148,108 @@ contract SmartnodesMultiSig is Initializable {
             addValidator(msg.sender);
         }
 
-        votes[msg.sender][proposalNum] = true;
-        numVotes[proposalNum]++;
+        hasVoted[msg.sender] = proposalNum;
+        proposalVotes[proposalNum]++;
 
-        emit Voted(proposalNum, msg.sender);
-
-        if (numVotes[proposalNum] >= requiredApprovals) {
-            // proposals[nextProposalId] = proposal;
-            _executeTransaction(proposalNum);
+        if (proposalVotes[proposalNum] >= requiredApprovals) {
+            emit ProposalReady(nextProposalId, proposalNum);
         }
     }
 
     /**
      * @notice Executes a proposal if it has enough approvals. Only to be called by approveTransaction
-     * @param proposalNum The ID of the proposal to be executed
      */
-    function _executeTransaction(uint8 proposalNum) internal onlyValidator {
-        // Load Proposal
-        Proposal memory proposal = currentProposals[proposalNum];
-
-        require(!proposal.executed, "Proposal already executed.");
+    function executeProposal(
+        address[] memory validatorsToRemove,
+        bytes32[] memory jobHashes,
+        uint256[] memory jobCapacities,
+        address[] memory workers,
+        uint256 totalCapacity
+    ) external onlyValidator {
+        uint8 proposalNum = hasSubmittedProposal[msg.sender];
+        require(proposalNum > 0, "Must be a proposal creator!");
         require(
-            proposal.functionTypes.length <= maxStateUpdates,
-            "Must not exceed max state updates!"
+            proposalVotes[proposalNum] >= requiredApprovals,
+            "Not enough proposal votes!"
         );
 
-        // Get total number of participant workers and their capacities
-        uint256 totalWorkers = 0;
+        bytes32 providedHash = currentProposals[proposalNum - 1];
+        bytes32 proposalHash = hashProposalData(
+            validatorsToRemove,
+            jobHashes,
+            jobCapacities,
+            workers,
+            totalCapacity
+        );
+        require(
+            proposalHash == providedHash,
+            "Proposal data doesn't match initial hash!"
+        );
 
-        for (uint i = 0; i < proposal.functionTypes.length; i++) {
-            if (proposal.functionTypes[i] == FunctionType.CompleteJob) {
-                (uint256 jobId, address[] memory workers) = abi.decode(
-                    proposal.data[i],
-                    (uint256, address[])
-                );
-                totalWorkers += workers.length;
+        if (validatorsToRemove.length > 0) {
+            for (uint i = 0; i < validatorsToRemove.length; i++) {
+                _removeValidator(validatorsToRemove[i]);
             }
         }
 
-        // Vars for calculating proportional capacities for each worker
-        uint256[] memory allCapacities = new uint256[](totalWorkers);
-        address[] memory allWorkers = new address[](totalWorkers);
-        uint256 totalCapacity = 0;
-        uint256 allWorkerInd = 0;
+        uint256 additionalReward = 0;
 
-        // Handle each state update function call
-        for (uint i = 0; i < proposal.functionTypes.length; i++) {
-            // Update connected validator stats
-            if (proposal.functionTypes[i] == FunctionType.DeactivateValidator) {
-                address validator = abi.decode(proposal.data[i], (address));
-                _removeValidator(validator);
-
-                // Create new jobs
-            } else if (proposal.functionTypes[i] == FunctionType.CreateJob) {
-                (
-                    bytes32 userHash,
-                    bytes32 jobHash,
-                    uint256[] memory _capacities
-                ) = abi.decode(proposal.data[i], (bytes32, bytes32, uint256[]));
-                _smartnodesContractInstance.requestJob(
-                    userHash,
-                    jobHash,
-                    _capacities
+        if (jobHashes.length > 0) {
+            for (uint i = 0; i < jobHashes.length; i++) {
+                uint256 reward = _smartnodesContractInstance.completeJob(
+                    jobHashes[i]
                 );
-
-                // Update completed existing jobs
-            } else if (proposal.functionTypes[i] == FunctionType.CompleteJob) {
-                (bytes32 jobId, address[] memory workers) = abi.decode(
-                    proposal.data[i],
-                    (bytes32, address[])
-                );
-
-                uint256[] memory capacities = _smartnodesContractInstance
-                    .completeJob(jobId, workers);
-
-                for (uint256 j = 0; j < capacities.length; j++) {
-                    totalCapacity += capacities[j];
-                    allCapacities[allWorkerInd] = capacities[j];
-                    allWorkers[allWorkerInd] = workers[j];
-                    allWorkerInd++;
-                }
+                additionalReward += reward;
             }
-            // } else if (proposal.functionTypes[i] == FunctionType.DisputeJob) {
-            //     uint256 jobId = abi.decode(proposal.data[i], (uint256));
-            //     _smartnodesContractInstance.disputeJob(jobId);
         }
 
-        // Gather validators who voted on the transaction
         address[] memory _approvedValidators = new address[](
-            numVotes[proposalNum]
+            proposalVotes[proposalNum]
         );
 
         for (uint i = 0; i < validators.length; i++) {
             address validator = validators[i];
 
-            if (votes[validator][proposalNum]) {
+            if (hasVoted[validator] == proposalNum) {
                 _approvedValidators[i] = validator;
             }
         }
 
         // Call mint function to generate rewards for workers and validators
         _smartnodesContractInstance.mintTokens(
-            allWorkers,
-            allCapacities,
+            workers,
+            jobCapacities,
             totalCapacity,
-            _approvedValidators
+            _approvedValidators,
+            additionalReward
         );
 
-        // Clean up old proposals, 1000 length window allows 20 days for proposals to be disputed, delete unused proposals
-        if (nextProposalId > 1000) {
-            delete proposals[nextProposalId - 1000];
-        }
-
-        proposal.executed = true;
-        emit ProposalExecuted(proposal.id);
-        proposals[nextProposalId] = proposal;
-        _resetCurrentValidators();
+        emit ProposalExecuted(nextProposalId);
         _updateRound();
+    }
+
+    function hashProposalData(
+        address[] memory validatorsToRemove,
+        bytes32[] memory jobHashes,
+        uint256[] memory jobCapacities,
+        address[] memory workers,
+        uint256 totalCapacity
+    ) public pure returns (bytes32) {
+        require(
+            workers.length == jobCapacities.length,
+            "Workers and capacities length mismatch"
+        );
+
+        return
+            keccak256(
+                abi.encode(
+                    validatorsToRemove,
+                    jobHashes,
+                    jobCapacities,
+                    workers,
+                    totalCapacity
+                )
+            );
     }
 
     /**
@@ -312,7 +258,7 @@ contract SmartnodesMultiSig is Initializable {
      */
     function addValidator(address validator) public {
         require(
-            _checkLockedTokens(validator),
+            _smartnodesContractInstance.isLocked(validator),
             "Validator must be registered and locked on SmartnodesCore!"
         );
         require(
@@ -333,20 +279,14 @@ contract SmartnodesMultiSig is Initializable {
     }
 
     /**
-     * @notice Rewards validators who voted for the majority on a proposal
-     * @param _proposalId The ID of the proposal
-     */
-    function _rewardValidators(uint256 _proposalId) internal {}
-
-    /**
      * @dev Update the number of required approvals (66% of the active validators)
      */
     function _updateApprovalRequirements() internal {
         requiredApprovals =
-            (validators.length * requiredApprovalsPercentage + 80) /
+            (validators.length * requiredApprovalsPercentage) /
             100;
 
-        if (requiredApprovals == 0) {
+        if (requiredApprovals < 1) {
             requiredApprovals = 1; // Ensure at least 1 approval is required
         }
     }
@@ -379,35 +319,31 @@ contract SmartnodesMultiSig is Initializable {
     }
 
     function _updateRound() internal {
-        for (uint8 i = 0; i < currentProposals.length; i++) {
-            numVotes[i] = 0;
-        }
-        for (uint i = 0; i < validators.length; i++) {
-            address validator = validators[i];
-            for (uint8 n = 0; n < currentProposals.length; n++) {
-                votes[validator][n] = false;
-            }
-        }
+        _resetCurrentValidators();
 
         while (currentProposals.length > 0) {
+            proposalVotes[uint8(currentProposals.length)] = 0;
             currentProposals.pop();
         }
 
         lastProposalTime = block.timestamp;
-        // randomRequestId = _requestRandomness();
         nextProposalId++;
     }
 
     function _resetCurrentValidators() internal {
         // Clear submission status and other parameters
         for (uint256 i = 0; i < currentRoundValidators.length; i++) {
-            hasSubmittedProposal[currentRoundValidators[i]] = false;
+            hasSubmittedProposal[currentRoundValidators[i]] = 0;
+        }
+
+        for (uint256 i = 0; i < validators.length; i++) {
+            hasVoted[validators[i]] = 0;
         }
 
         // If it's the genesis proposal and no round validators exist
         if (currentRoundValidators.length == 0) {
             for (uint256 i = 0; i < validators.length; i++) {
-                hasSubmittedProposal[validators[i]] = false;
+                hasSubmittedProposal[validators[i]] = 0;
             }
         }
 
@@ -461,7 +397,7 @@ contract SmartnodesMultiSig is Initializable {
         uint256 numValidators
     ) external view returns (address[] memory) {
         require(
-            validators.length > numValidators,
+            validators.length >= numValidators,
             "Not enough active validators!"
         );
 
@@ -480,49 +416,13 @@ contract SmartnodesMultiSig is Initializable {
         return selectedValidators;
     }
 
-    // function _requestRandomness() internal returns (uint256 requestId) {
-    //     require(validators.length > 0, "No validators available");
+    function halvePeriod() external onlySmartnodesCore {
+        updateTime /= 2;
+    }
 
-    //     // Request random words from Chainlink VRF
-    //     requestId = COORDINATOR.requestRandomWords(
-    //         s_keyHash,
-    //         s_subscriptionId,
-    //         requestConfirmations,
-    //         callbackGasLimit,
-    //         numWords
-    //     );
-
-    //     return requestId;
-    // }
-
-    // // Random selection of validators for next proposals once a random number is received
-    // function fulfillRandomWords(
-    //     uint256 requestId,
-    //     uint256[] memory randomWords
-    // ) internal override {
-    //     require(validators.length > 0, "No validators available");
-    //     require(
-    //         msg.sender == vrfCoordinator,
-    //         "Only VRF coordinator can fulfil this request!"
-    //     );
-    //     require(randomWords.length > 0, "No random words provided");
-    //     require(requestId == randomRequestId, "Invalid request!");
-
-    //     uint256 randomValue = randomWords[0];
-    //     uint8 nValidators = 3; // TODO dynamic or static gloabal nValidator parameter
-
-    //     address[] memory selectedValidators = new address[](nValidators);
-
-    //     for (uint8 i = 0; i < nValidators; i++) {
-    //         uint256 randomIndex = randomValue % validators.length;
-    //         selectedValidators[i] = validators[randomIndex];
-
-    //         // Re-select if already picked
-    //         randomValue = uint256(keccak256(abi.encodePacked(randomValue, i)));
-    //     }
-
-    //     currentRoundValidators = selectedValidators;
-    // }
+    function getNumValidators() external view returns (uint256) {
+        return validators.length;
+    }
 
     function isActiveValidator(
         address _validatorAddress
@@ -530,43 +430,15 @@ contract SmartnodesMultiSig is Initializable {
         return isValidator[_validatorAddress];
     }
 
-    function _checkLockedTokens(
-        address validatorAddress
-    ) internal view returns (bool) {
-        return _smartnodesContractInstance.isLocked(validatorAddress);
-    }
-
-    function getNumValidators() external view returns (uint256) {
-        return validators.length;
-    }
-
-    function getSelectedValidators() external view returns (address[] memory) {
-        return currentRoundValidators;
-    }
-
-    // Get detailed info on a current proposal
-    function getProposalData(
-        uint8 _proposalId
-    ) external view returns (Proposal memory) {
-        return proposals[_proposalId];
-    }
-
-    function getCurrentProposal(
-        uint8 proposalNum
-    ) external view returns (uint[] memory, bytes[] memory) {
-        require(proposalNum < currentProposals.length, "Proposal not found!");
-        Proposal memory proposal = currentProposals[proposalNum];
-
-        uint[] memory functionTypeAsUint = new uint[](
-            proposal.functionTypes.length
-        );
-
-        for (uint i = 0; i < proposal.functionTypes.length; i++) {
-            functionTypeAsUint[i] = uint(proposal.functionTypes[i]);
-        }
-
-        return (functionTypeAsUint, proposal.data);
-    }
+    // function getCurrentProposal(
+    //     uint8 proposalNum
+    // ) external view returns (RemoveValidator[] memory, CompleteJob[] memory) {
+    //     require(proposalNum < currentProposals.length, "Proposal not found!");
+    //     return (
+    //         currentProposals[proposalNum].validatorRemovals,
+    //         currentProposals[proposalNum].jobCompletions
+    //     );
+    // }
 
     // Get basic info on the current state of the validator multisig
     function getState()
@@ -581,6 +453,4 @@ contract SmartnodesMultiSig is Initializable {
             currentRoundValidators
         );
     }
-
-    // function getContractParams() external view returns () {}
 }

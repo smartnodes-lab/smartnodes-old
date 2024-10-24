@@ -18,27 +18,6 @@ DEPLOY_NEW = True
 UPGRADE = False
 
 
-def hash_proposal_data(
-    validators_to_remove, 
-    job_hashes, 
-    job_capacities, 
-    workers
-):
-    total_capacity = sum(job_capacities)
-    encoded_data = encode(
-        ["address[]", "bytes32[]", "uint256[]", "address[]", "uint256"],
-        [
-            validators_to_remove,
-            job_hashes,
-            job_capacities,
-            workers,
-            total_capacity
-        ]
-    )
-
-    return Web3.keccak(encoded_data)
-
-
 def deploy_proxy_admin(account):
     if DEPLOY_NEW:
         proxy_admin = ProxyAdmin.deploy({"from": account})
@@ -134,8 +113,6 @@ def initialize_contracts(account, genesis_accounts, core, multisig):
 
 def main():
     # Account to deploy the proxy (proxy admin, to become a DAO of sorts)
-    account = accounts[0]
-
     proxy_admin = deploy_proxy_admin(account)
     sno = deploy_smartnodes(account, proxy_admin)
     sno_multisig = deploy_smartnodesValidator(account, proxy_admin)
@@ -174,74 +151,45 @@ def main():
     
     job_hashes = [
         bytes.fromhex(hashlib.sha256(str(random.random()).encode()).hexdigest()),
-        bytes.fromhex(hashlib.sha256(str(random.random()).encode()).hexdigest()),
-        bytes.fromhex(hashlib.sha256(str(random.random()).encode()).hexdigest()),
-        bytes.fromhex(hashlib.sha256(str(random.random()).encode()).hexdigest()),
-        bytes.fromhex(hashlib.sha256(str(random.random()).encode()).hexdigest()),
-        bytes.fromhex(hashlib.sha256(str(random.random()).encode()).hexdigest())
     ]
-    job_capacities = []
-    workers = []
-
-    for i in range(100):
-        job_capacities.append(int(1e9))
-        workers.append(account.address)
-
-    # Remove validator test
+    
     sno_multisig.createProposal(
-        hash_proposal_data([], job_hashes, job_capacities, workers), {"from": account}
+        [], job_hashes, [], [], {"from": account}
     )
-    sno_multisig.approveTransaction(1, {"from": account})
-    sno_multisig.executeProposal(
-        [],
-        job_hashes,
-        job_capacities,
-        workers,
-        sum(job_capacities),
-        {"from": account}
-    )
+    tx = sno_multisig.approveTransaction(1, {"from": account})
 
     print("\n_________________Contract State_________________\n")
     print(f"Validator: {sno.validators(1)}")
     print(f"Multisig State: {sno_multisig.getState()}")
     print(f"Outstanding Tokens: {sno.totalSupply()/1e18}\n\n")
 
-    # # Job Creation Test
-    # sno_multisig.createProposal(
-    #     [], job_hashes, job_capacities, workers, {"from": account}
-    # )
-    # sno_multisig.approveTransaction(1, {"from": account})
+    # Job Creation Test
+    job_capacities = [int(1e9)]
+    workers = [accounts[0].address]
+      
+    sno_multisig.createProposal(
+        [], [], job_capacities, workers, {"from": account}
+    )
+    sno_multisig.approveTransaction(1, {"from": account})
 
-    # print("\n_________________Contract State_________________\n")
-    # print(f"Validator: {sno.validators(1)}")
-    # print(f"Multisig State: {sno_multisig.getState()}")
-    # print(f"Outstanding Tokens: {sno.totalSupply()/1e18}\n\n")
+    print("\n_________________Contract State_________________\n")
+    print(f"Validator: {sno.validators(1)}")
+    print(f"Multisig State: {sno_multisig.getState()}")
+    print(f"Outstanding Tokens: {sno.totalSupply()/1e18}\n\n")
     
-    # # Job Creation Test
-    # sno_multisig.createProposal(
-    #     [], job_hashes, job_capacities, workers, {"from": account}
-    # )
-    # sno_multisig.approveTransaction(1, {"from": account})
-
-    # # Job completion test
-    # sno_multisig.createProposal(calldata3[0], calldata3[1], {"from": account})
-    # # sno_multisig.approveTransaction(0, {"from": accounts[1]})
-    # sno_multisig.approveTransaction(0, {"from": account})
-    
-    # print("\n_________________Contract State_________________\n")
-    # print(f"Validator: {sno.validators(1)}")
-    # print(f"User: {sno.users('0d976b7e1fd59537000313e274dc6a9d035ebaf95f4b8857740f7c799abd8629')}")
-    # print(f"Job: {sno.jobs(hashlib.sha256().hexdigest())}")
-    # print(f"Proposal: {sno_multisig.proposals(1)}")
-    # print(f"Multisig State: {sno.getState()}")
-    # print(f"Outstanding Tokens: {sno.totalSupply()/1e18}\n\n")
-
-    # # Job completion test
-    # sno_multisig.createProposal(calldata4[0], calldata4[1], {"from": account})
-    # # sno_multisig.approveTransaction(0, {"from": accounts[1]})
-    # sno_multisig.approveTransaction(0, {"from": account})
-
-    sno.unlockTokens(10e18, {"from": account})
+    # Job Creation Test LARGE
+    job_hashes = [
+        bytes.fromhex(hashlib.sha256(str(random.random()).encode()).hexdigest()),
+        bytes.fromhex(hashlib.sha256(str(random.random()).encode()).hexdigest()),
+        bytes.fromhex(hashlib.sha256(str(random.random()).encode()).hexdigest())
+    ]
+    job_capacities = [int(1e9), int(1e9), int(1e9), int(1e9), int(1e9), int(1e9)]
+    workers = [accounts[0].address, accounts[0].address, accounts[0].address, accounts[0].address, accounts[0].address, accounts[0].address]
+      
+    sno_multisig.createProposal(
+        [], job_hashes, job_capacities, workers, {"from": account}
+    )
+    sno_multisig.approveTransaction(1, {"from": account})
 
     print("\n_________________Final Contract State_________________\n")
     print(f"Validator: {sno.validators(1)}")

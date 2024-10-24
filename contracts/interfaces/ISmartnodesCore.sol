@@ -9,10 +9,7 @@ interface ISmartnodesCore {
         bytes32 jobHash,
         uint256[] calldata _capacities
     ) external returns (uint256[] memory);
-    function completeJob(
-        bytes32 jobHash,
-        address[] memory _workers
-    ) external returns (uint256[] memory);
+    function completeJob(bytes32 jobHash) external returns (uint256);
     function disputeJob(uint256 jobId) external;
     function lockTokens(uint32 amou256) external;
     function unlockTokens(uint256 amount) external;
@@ -20,7 +17,8 @@ interface ISmartnodesCore {
         address[] memory _workers,
         uint256[] memory _workerCapacities,
         uint256 _totalCapacity,
-        address[] memory _validatorsVoted
+        address[] memory _validatorsVoted,
+        uint256 additionalReward
     ) external;
     function getJobValidators(
         uint256 jobId

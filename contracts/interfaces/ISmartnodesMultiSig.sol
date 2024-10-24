@@ -2,24 +2,34 @@
 pragma solidity ^0.8.5;
 
 interface ISmartnodesMultiSig {
+    struct RemoveValidator {
+        address validator;
+    }
+
+    struct CompleteJob {
+        bytes32 jobHash;
+        uint256[] capacities;
+        address[] workers;
+    }
+
     function initialize(address target) external;
     function createProposal(
-        FunctionType[] calldata _functionTypes,
-        bytes[] calldata _data
+        RemoveValidator[] memory _functionTypes,
+        CompleteJob[] memory _data
     ) external;
-    function approveTransaction(uint256 _proposalId) external;
+    function approveTransaction(uint8 proposalNum) external;
     function removeValidator(address validator) external;
-    function updateLockedTokens(
-        address _validator,
-        uint256 locked,
-        bool enough
+    function executeProposal(
+        address[] memory validatorsToRemove,
+        bytes32[] memory jobHashes,
+        uint256[] memory jobCapacities,
+        address[] memory workers,
+        uint256 totalCapacity
     ) external;
+
     function generateValidators(
         uint256 numValidators
     ) external view returns (address[] memory);
-    function isActiveValidator(
-        address _validatorAddress
-    ) external view returns (bool);
     function getNumValidators() external view returns (uint256);
     function getSelectedValidators() external view returns (address[] memory);
     function getCurrentProposal(
@@ -29,16 +39,11 @@ interface ISmartnodesMultiSig {
         external
         view
         returns (uint256, uint256, uint256, address[] memory);
+    function halvePeriod() external;
+    function isActiveValidator(
+        address _validatorAddress
+    ) external view returns (bool);
 
-    enum FunctionType {
-        UpdateValidator,
-        ConfirmValidator,
-        CompleteJob,
-        DisputeJob
-    }
-
-    event ProposalCreated(uint256 proposalId, bytes data);
-    event Voted(uint256 proposalId, address validator);
     event ProposalExecuted(uint256 proposalId);
     event Deposit(address indexed sender, uint amount);
     event ValidatorAdded(address validator);
