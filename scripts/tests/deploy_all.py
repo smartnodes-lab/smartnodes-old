@@ -116,7 +116,9 @@ def main():
     proxy_admin = deploy_proxy_admin(account)
     sno = deploy_smartnodes(account, proxy_admin)
     sno_multisig = deploy_smartnodesValidator(account, proxy_admin)
-    initialize_contracts(account, [account], sno, sno_multisig)
+
+    seed_validators = [account, "0xA9c5307090c4F7d98541C7a444f1C395F2d7e135"]
+    initialize_contracts(account, seed_validators, sno, sno_multisig)
 
     # Deploy a user and validator
     if DEPLOY_NEW:

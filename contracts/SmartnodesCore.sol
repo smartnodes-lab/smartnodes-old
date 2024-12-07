@@ -8,7 +8,7 @@ contract SmartnodesCore is ERC20Upgradeable {
     ISmartnodesMultiSig public validatorContract;
     address public proxyAdmin;
 
-    uint256 public tailEmission = 8e18;
+    uint256 public tailEmission = 8e18; // a relative number as the state-time can be adjusted. Equivalent to
     uint256 public constant UNLOCK_PERIOD = 1_209_600; // 14 days in seconds
 
     uint256 public emissionRate;
@@ -44,7 +44,7 @@ contract SmartnodesCore is ERC20Upgradeable {
     event UnlockInitiated(address indexed validator, uint256 unlockTime);
     event TokensUnlocked(address indexed validator, uint256 amount);
     event JobRequested(uint256 jobId, bytes32 jobHash, bytes32 userHash);
-    event JobCompleted(uint256 indexed jobId, bytes32 jobHash);
+    event JobCompleted(uint256 jobId, bytes32 jobHash);
     event JobDisputed(bytes32 indexed jobId, uint256 timestamp);
 
     modifier onlyValidatorMultiSig() {
@@ -64,8 +64,8 @@ contract SmartnodesCore is ERC20Upgradeable {
         __ERC20_init("Smartnodes", "SNO");
         proxyAdmin = msg.sender;
         emissionRate = 2048e18;
-        lockAmount = 100_000e18;
-        halvingPeriod = 8742;
+        lockAmount = 500_000e18;
+        halvingPeriod = 8742; // 364.25 * 24
         statesSinceLastHalving = 0;
         unlockPeriod = 1_209_600; // (14 days in seconds)
 
@@ -95,37 +95,44 @@ contract SmartnodesCore is ERC20Upgradeable {
         validatorContract.halvePeriod(); // Halve the time required between state updates
     }
 
-    // Request a job and associate a payment with it
-    function requestJob(
-        bytes32 userHash,
-        bytes32 jobHash,
-        uint256[] calldata capacities,
-        uint256 paymentAmount // Accept payment in tokens
-    ) external {
-        require(jobHashToId[jobHash] == 0, "Job already created!");
-        require(capacities.length > 0, "Job must have a capacity.");
-        jobHashToId[jobHash] = jobCounter;
-
-        // Require a payment for the job
-        require(paymentAmount > 0, "Payment must be greater than zero.");
-        require(
-            balanceOf(msg.sender) >= paymentAmount,
-            "Insufficient token balance."
-        );
-        require(capacities.length > 0, "");
-
-        // Transfer the payment tokens and burn them
-        _transfer(msg.sender, address(0), paymentAmount); // Burn the tokens by sending to zero address
-
-        // Store the job with associated payment
-        jobs[jobCounter] = Job({
-            capacities: capacities,
-            payment: paymentAmount // Store the payment amount
-        });
-
-        emit JobRequested(jobCounter, jobHash, userHash);
-        jobCounter++;
+    function doubleStateTime() external onlyProxyAdmin {
+        tailEmission *= 2;
+        emissionRate *= 2;
+        halvingPeriod /= 2; // Double the state updates requied between halvings
+        validatorContract.doublePeriod(); // Halve the time required between state updates
     }
+
+    // Request a job and associate a payment with it
+    // function requestJob(
+    //     bytes32 userHash,
+    //     bytes32 jobHash,
+    //     uint256[] calldata capacities,
+    //     uint256 paymentAmount // Accept payment in tokens
+    // ) external {
+    //     require(jobHashToId[jobHash] == 0, "Job already created!");
+    //     require(capacities.length > 0, "Job must have a capacity.");
+    //     jobHashToId[jobHash] = jobCounter;
+
+    //     // Require a payment for the job
+    //     require(paymentAmount > 0, "Payment must be greater than zero.");
+    //     require(
+    //         balanceOf(msg.sender) >= paymentAmount,
+    //         "Insufficient token balance."
+    //     );
+    //     require(capacities.length > 0, "");
+
+    //     // Transfer the payment tokens and burn them
+    //     _transfer(msg.sender, address(0), paymentAmount); // Burn the tokens by sending to zero address
+
+    //     // Store the job with associated payment
+    //     jobs[jobCounter] = Job({
+    //         capacities: capacities,
+    //         payment: paymentAmount // Store the payment amount
+    //     });
+
+    //     emit JobRequested(jobCounter, jobHash, userHash);
+    //     jobCounter++;
+    // }
 
     // Complete the job and distribute payment to validators/workers
     function completeJob(
@@ -226,6 +233,9 @@ contract SmartnodesCore is ERC20Upgradeable {
 
         // Initialize the unlock time if it's the first unlock attempt
         if (validator.unlockTime == 0) {
+            if (validator.locked < lockAmount) {
+                validatorContract.removeValidator(msg.sender);
+            }
             validator.unlockTime = block.timestamp + unlockPeriod; // unlocking period
 
             // Update multisig validator

@@ -11,15 +11,6 @@ import "./interfaces/ISmartnodesCore.sol";
      managing the Core contract
 */
 contract SmartnodesMultiSig is Initializable {
-    // Proposal for a Smartnodes Update
-    struct Proposal {
-        address[] validatorsToRemove;
-        bytes32[] jobHashes;
-        uint256[] allCapacities;
-        address[] workers;
-        uint256 totalCapacity;
-    }
-
     // State update constraints
     uint256 public updateTime = 3600; // 60 minutes minimum required between state updates
     uint256 public requiredApprovalsPercentage;
@@ -37,20 +28,14 @@ contract SmartnodesMultiSig is Initializable {
     address[] public validators;
     address[] public currentRoundValidators;
     bytes32[] public currentProposals;
+    uint8[] public readyProposals;
 
-    mapping(address => bool) public isValidator; // For quick validator checks
+    mapping(address => bool) public isValidator;
     mapping(address => uint8) public hasSubmittedProposal;
     mapping(address => uint8) public hasVoted;
     mapping(uint8 => uint256) public proposalVotes;
 
-    event ProposalCreated(
-        uint256 proposalRound,
-        uint8 proposalNum,
-        bytes32 proposalHash,
-        address validator
-    );
-    event ProposalReady(uint256 proposalId, uint8 proposalNum);
-    event ProposalExecuted(uint256 proposalId);
+    event ProposalExecuted(uint256 proposalId, bytes32 proposalHash);
     event Deposit(address indexed sender, uint amount);
     event ValidatorAdded(address validator);
     event ValidatorRemoved(address validator);
@@ -95,7 +80,7 @@ contract SmartnodesMultiSig is Initializable {
         smartnodesContractAddress = target;
 
         maxStateUpdates = 30;
-        updateTime = 0;
+        updateTime = 3600;
 
         _smartnodesContractInstance = ISmartnodesCore(target);
 
@@ -117,19 +102,16 @@ contract SmartnodesMultiSig is Initializable {
     ) external onlySelectedValidator {
         require(
             block.timestamp - lastProposalTime >= updateTime,
-            "Proposals must be submitted 0-10 mins after since last executed proposal!"
+            "Proposals must be submitted 0-10 mins after last executed proposal!"
+        );
+        require(
+            hasSubmittedProposal[msg.sender] == 0,
+            "Validator has already submitted a proposal"
         );
 
         currentProposals.push(proposalHash);
         uint8 proposalNum = uint8(currentProposals.length);
         hasSubmittedProposal[msg.sender] = proposalNum;
-
-        emit ProposalCreated(
-            nextProposalId,
-            proposalNum,
-            proposalHash,
-            msg.sender
-        );
     }
 
     /**
@@ -152,7 +134,7 @@ contract SmartnodesMultiSig is Initializable {
         proposalVotes[proposalNum]++;
 
         if (proposalVotes[proposalNum] >= requiredApprovals) {
-            emit ProposalReady(nextProposalId, proposalNum);
+            readyProposals.push(proposalNum);
         }
     }
 
@@ -224,7 +206,7 @@ contract SmartnodesMultiSig is Initializable {
             additionalReward
         );
 
-        emit ProposalExecuted(nextProposalId);
+        emit ProposalExecuted(nextProposalId, proposalHash);
         _updateRound();
     }
 
@@ -326,6 +308,10 @@ contract SmartnodesMultiSig is Initializable {
             currentProposals.pop();
         }
 
+        while (readyProposals.length > 0) {
+            readyProposals.pop();
+        }
+
         lastProposalTime = block.timestamp;
         nextProposalId++;
     }
@@ -420,6 +406,10 @@ contract SmartnodesMultiSig is Initializable {
         updateTime /= 2;
     }
 
+    function doublePeriod() external onlySmartnodesCore {
+        updateTime /= 2;
+    }
+
     function getNumValidators() external view returns (uint256) {
         return validators.length;
     }
@@ -441,16 +431,19 @@ contract SmartnodesMultiSig is Initializable {
     // }
 
     // Get basic info on the current state of the validator multisig
-    function getState()
-        external
-        view
-        returns (uint256, uint256, uint256, address[] memory)
-    {
-        return (
-            lastProposalTime,
-            nextProposalId,
-            validators.length,
-            currentRoundValidators
-        );
+    function getState() external view returns (uint256, address[] memory) {
+        return (nextProposalId, currentRoundValidators);
+    }
+
+    function isProposalReady(
+        uint256 proposalNumber
+    ) external view returns (bool) {
+        for (uint i = 0; i < readyProposals.length; i++) {
+            if (readyProposals[i] == proposalNumber) {
+                return true;
+            }
+        }
+
+        return false;
     }
 }

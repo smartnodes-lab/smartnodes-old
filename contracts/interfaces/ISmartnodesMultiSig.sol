@@ -35,11 +35,9 @@ interface ISmartnodesMultiSig {
     function getCurrentProposal(
         uint8 proposalNum
     ) external view returns (uint[] memory, bytes[] memory);
-    function getState()
-        external
-        view
-        returns (uint256, uint256, uint256, address[] memory);
+    function getState() external view returns (uint256, address[] memory);
     function halvePeriod() external;
+    function doublePeriod() external;
     function isActiveValidator(
         address _validatorAddress
     ) external view returns (bool);
