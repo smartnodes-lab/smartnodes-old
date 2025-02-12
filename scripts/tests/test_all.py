@@ -14,8 +14,29 @@ load_dotenv(".env", override=True)
 private_key = os.getenv("PRIVATE_KEY")
 account = accounts.add(private_key)
 
-DEPLOY_NEW = False
-UPGRADE = True
+DEPLOY_NEW = True
+UPGRADE = False
+
+
+def hash_proposal_data(
+    validators_to_remove, 
+    job_hashes, 
+    job_capacities, 
+    workers
+):
+    total_capacity = sum(job_capacities)
+    encoded_data = encode(
+        ["address[]", "bytes32[]", "uint256[]", "address[]", "uint256"],
+        [
+            validators_to_remove,
+            job_hashes,
+            job_capacities,
+            workers,
+            total_capacity
+        ]
+    )
+
+    return Web3.keccak(encoded_data)
 
 
 def hash_proposal_data(
@@ -40,102 +61,56 @@ def hash_proposal_data(
 
 
 def deploy_proxy_admin(account):
-    if DEPLOY_NEW:
-        proxy_admin = ProxyAdmin.deploy({"from": account})
-        proxy_address = proxy_admin.address
-    else:
-        proxy_address = os.getenv("SMARTNODES_ADMIN_ADDRESS")
-
-        if proxy_address:
-            proxy_admin = Contract.from_abi("SmartnodesProxyAdmin", proxy_address, ProxyAdmin.abi)
-        else:
-            raise "Proxy Admin contract not found!"
-    
+    proxy_admin = ProxyAdmin.deploy([account.address], {"from": account})
+    proxy_address = proxy_admin.address
     set_key(".env", "SMARTNODES_ADMIN_ADDRESS", proxy_address)
     return proxy_admin
 
 
 def deploy_smartnodes(account, proxy_admin):
-    if UPGRADE:
-        new_smartnodes = SmartnodesCore.deploy({"from": account})
-        smartnodes_proxy_address = os.getenv("SMARTNODES_ADDRESS")
+    sno = SmartnodesCore.deploy({"from": account})
+    
+    encoded_init_function = encode_function_data(initializer=sno.initialize)
+    
+    sno_proxy = TransparentProxy.deploy(
+        sno.address,
+        proxy_admin.address,
+        encoded_init_function,
+        {"from": account}
+    )
+    sno_proxy = Contract.from_abi("SmartnodesCore", sno_proxy.address, SmartnodesCore.abi)
+    smartnodes_address = sno_proxy.address
 
-    #     if smartnodes_proxy_address:
-    #         proxy = TransparentProxy.at(smartnodes_proxy_address)
-    #         upgrade_tx = proxy_admin.upgrade(proxy.address, new_smartnodes.address, {"from": account})
-    #         upgrade_tx.wait(1)
-    #         sno_proxy = Contract.from_abi("SmartnodesCore", smartnodes_proxy_address, SmartnodesCore.abi)
-    #         smartnodes_address = sno_proxy.address
-    #     else:
-    #         raise Exception("Smartnodes proxy contract not found!")
-    # elif DEPLOY_NEW:
-    #     sno = SmartnodesCore.deploy({"from": account})
-    #     encoded_init_function = encode_function_data(initializer=sno.initialize)
-    #     sno_proxy = TransparentProxy.deploy(
-    #         sno.address,
-    #         proxy_admin.address,
-    #         encoded_init_function,
-    #         {"from": account}
-    #     )
-    #     sno_proxy = Contract.from_abi("SmartnodesCore", sno_proxy.address, SmartnodesCore.abi)
-    #     smartnodes_address = sno_proxy.address
-    # else:
-    smartnodes_address = os.getenv("SMARTNODES_ADDRESS")
-    if smartnodes_address:
-        sno_proxy = Contract.from_abi("SmartnodesCore", smartnodes_address, SmartnodesCore.abi)
-    else:
-        raise Exception("SmartnodesCore contract not found!")
-
-    set_key(".env", "SMARTNODES_ADDRESS", smartnodes_address)
+    set_key(".env", "SMARTNODES_ADDRESS", smartnodes_address)    
     return sno_proxy
 
 
 def deploy_smartnodesValidator(account, proxy_admin):
-    if UPGRADE:
-        new_smartnodes_multisig = SmartnodesMultiSig.deploy({"from": account})
-        smartnodes_multisig_proxy_address = os.getenv("SMARTNODES_MULTISIG_ADDRESS")
+    sno_multisig = SmartnodesMultiSig.deploy({"from": account})
 
-        if smartnodes_multisig_proxy_address:
-            proxy = TransparentProxy.at(smartnodes_multisig_proxy_address)
-            upgrade_tx = proxy_admin.upgrade(proxy.address, new_smartnodes_multisig.address, {"from": account})
-            upgrade_tx.wait(1)
-            sno_multisig_proxy = Contract.from_abi("SmartnodesMultiSig", smartnodes_multisig_proxy_address, SmartnodesMultiSig.abi)
-            smartnodes_multisig_address = sno_multisig_proxy.address
-        else:
-            raise Exception("SmartnodesMultiSig proxy contract not found!")
-    elif DEPLOY_NEW:
-        sno_multisig = SmartnodesMultiSig.deploy({"from": account})
-        encoded_init_function = encode_function_data(initializer=sno_multisig.initialize)
-        sno_multisig_proxy = TransparentProxy.deploy(
-            sno_multisig.address,
-            proxy_admin.address,
-            encoded_init_function,
-            {"from": account}
-        )
-        sno_multisig_proxy = Contract.from_abi("SmartnodesMultiSig", sno_multisig_proxy.address, SmartnodesMultiSig.abi)
-        smartnodes_multisig_address = sno_multisig_proxy.address
-    else:
-        smartnodes_multisig_address = os.getenv("SMARTNODES_MULTISIG_ADDRESS")
-        if smartnodes_multisig_address:
-            sno_multisig_proxy = Contract.from_abi("SmartnodesMultiSig", smartnodes_multisig_address, SmartnodesMultiSig.abi)
-        else:
-            raise Exception("SmartnodesMultiSig contract not found!")
+    encoded_init_function = encode_function_data(initializer=sno_multisig.initialize)
 
+    sno_multisig_proxy = TransparentProxy.deploy(
+        sno_multisig.address,
+        proxy_admin.address,
+        encoded_init_function,
+        {"from": account}
+    )
+    sno_multisig_proxy = Contract.from_abi("SmartnodesMultiSig", sno_multisig_proxy.address, SmartnodesMultiSig.abi)
+    smartnodes_multisig_address = sno_multisig_proxy.address
     set_key(".env", "SMARTNODES_MULTISIG_ADDRESS", smartnodes_multisig_address)
     return sno_multisig_proxy
 
 
 def initialize_contracts(account, genesis_accounts, core, multisig):
-    if DEPLOY_NEW:
-        core.initialize(genesis_accounts, {'from': account})
-        multisig.initialize(core.address, {"from": account})
-        core.setValidatorContract(multisig, {"from": account})
+    core.initialize(genesis_accounts, {'from': account})
+    multisig.initialize(core.address, {"from": account})
+    core.setValidatorContract(multisig, {"from": account})
     
-
 
 def main():
     # Account to deploy the proxy (proxy admin, to become a DAO of sorts)
-    # account = accounts[0]
+    account = accounts[0]
 
     proxy_admin = deploy_proxy_admin(account)
     sno = deploy_smartnodes(account, proxy_admin)
@@ -152,76 +127,72 @@ def main():
         )
         sno_multisig.addValidator(account, {"from": account})
 
-    # print("\n_________________Contract State_________________")
-    # print(f"Validator: {sno.validators(1)}")
-    # print(f"Multisig State: {sno_multisig.getState()}")
-    # print(f"Outstanding Tokens: {sno.totalSupply()/1e18}\n\n")
-    
-    # job_hashes = [
-    #     bytes.fromhex(hashlib.sha256(str(random.random()).encode()).hexdigest()),
-    #     bytes.fromhex(hashlib.sha256(str(random.random()).encode()).hexdigest()),
-    #     bytes.fromhex(hashlib.sha256(str(random.random()).encode()).hexdigest()),
-    #     bytes.fromhex(hashlib.sha256(str(random.random()).encode()).hexdigest()),
-    #     bytes.fromhex(hashlib.sha256(str(random.random()).encode()).hexdigest()),
-    #     bytes.fromhex(hashlib.sha256(str(random.random()).encode()).hexdigest())
-    # ]
-    # job_capacities = []
-    # workers = []
+    print("\n_________________Contract State_________________")
+    print(f"Validator: {sno.validators(account.address)}")
+    print(f"Multisig State: {sno_multisig.getState()}")
+    print(f"Outstanding Tokens: {sno.totalSupply()/1e18}\n\n")
+    print(sno_multisig.lastProposalTime.call())
 
-    # for i in range(100):
-    #     job_capacities.append(int(1e9))
-    #     workers.append(account.address)
+    job_hashes = [
+        bytes.fromhex(hashlib.sha256(str(random.random()).encode()).hexdigest()),
+        bytes.fromhex(hashlib.sha256(str(random.random()).encode()).hexdigest()),
+        bytes.fromhex(hashlib.sha256(str(random.random()).encode()).hexdigest()),
+        bytes.fromhex(hashlib.sha256(str(random.random()).encode()).hexdigest()),
+        bytes.fromhex(hashlib.sha256(str(random.random()).encode()).hexdigest()),
+        bytes.fromhex(hashlib.sha256(str(random.random()).encode()).hexdigest())
+    ]
+    job_capacities = []
+    workers = []
 
-    # Remove validator test
-    # Job Creation Test
-    # Job Creation Test
-    # Job completion test
+    for i in range(100):
+        job_capacities.append(int(1e9))
+        workers.append(account.address)
 
-    # sno_multisig.createProposal(
-    #     hash_proposal_data([], job_hashes, job_capacities, workers), {"from": account}
-    # )
-    # sno_multisig.approveTransaction(1, {"from": account})
-    # sno_multisig.executeProposal(
-    #     [],
-    #     job_hashes,
-    #     job_capacities,
-    #     workers,
-    #     sum(job_capacities),
-    #     {"from": account}
-    # )
+    sno_multisig.createProposal(
+        hash_proposal_data([], job_hashes, job_capacities, workers), {"from": account}
+    )
+    sno_multisig.approveTransaction(1, {"from": account})
+    sno_multisig.executeProposal(
+        [],
+        job_hashes,
+        job_capacities,
+        workers,
+        [sum(job_capacities)],
+        {"from": account}
+    )
 
-    # network.web3.provider.make_request("evm_mine", [])
+    network.web3.provider.make_request("evm_mine", [])
 
-    # print("\n_________________Contract State_________________\n")
-    # print(f"Validator: {sno.validators(1)}")
-    # print(f"Multisig State: {sno_multisig.getState()}")
-    # print(f"Outstanding Tokens: {sno.totalSupply()/1e18}\n\n")
+    print("\n_________________Contract State_________________\n")
+    print(f"Validator: {sno.validators(account.address)}")
+    print(f"Multisig State: {sno_multisig.getState()}")
+    print(f"Outstanding Tokens: {sno.totalSupply()/1e18}\n\n")
+    print(sno_multisig.lastProposalTime.call())
 
-    # sno_multisig.createProposal(
-    #     hash_proposal_data([], job_hashes, job_capacities, workers), {"from": account}
-    # )
-    # sno_multisig.approveTransaction(1, {"from": account})
-    # sno_multisig.executeProposal(
-    #     [],
-    #     job_hashes,
-    #     job_capacities,
-    #     workers,
-    #     sum(job_capacities),
-    #     {"from": account}
-    # )
+    sno_multisig.createProposal(
+        hash_proposal_data([], job_hashes, job_capacities, workers), {"from": account}
+    )
+    sno_multisig.approveTransaction(1, {"from": account})
+    sno_multisig.executeProposal(
+        [],
+        job_hashes,
+        job_capacities,
+        workers,
+        [sum(job_capacities)],
+        {"from": account}
+    )
 
-    # print("\n_________________Contract State_________________\n")
-    # print(f"Validator: {sno.validators(1)}")
-    # print(f"User: {sno.users('0d976b7e1fd59537000313e274dc6a9d035ebaf95f4b8857740f7c799abd8629')}")
-    # print(f"Job: {sno.jobs(hashlib.sha256().hexdigest())}")
-    # print(f"Proposal: {sno_multisig.proposals(1)}")
-    # print(f"Multisig State: {sno.getState()}")
-    # print(f"Outstanding Tokens: {sno.totalSupply()/1e18}\n\n")
+    print("\n_________________Contract State_________________\n")
+    print(f"Validator: {sno.validators(account.address)}")
+    print(f"Multisig State: {sno_multisig.getState()}")
+    print(f"Outstanding Tokens: {sno.totalSupply()/1e18}\n\n")
+    print(sno_multisig.lastProposalTime.call())
 
-    # sno.unlockTokens(10e18, {"from": account})
+    sno.unlockTokens(10e18, {"from": account})
 
     print("\n_________________Final Contract State_________________\n")
-    print(f"Validator: {sno.validators(1)}")
+    print(f"Validator: {sno.validators(account.address)}")
     print(f"Multisig State: {sno_multisig.getState()}")
     print(f"Outstanding Tokens: {sno.totalSupply()/1e18}")
     
+    network.web3.provider.make_request("evm_mine", [])

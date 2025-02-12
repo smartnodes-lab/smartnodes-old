@@ -2,13 +2,19 @@
 pragma solidity ^0.8.5;
 
 import "@openzeppelin-upgradeable/contracts/token/ERC20/ERC20Upgradeable.sol";
+import "@openzeppelin-upgradeable/contracts/security/ReentrancyGuardUpgradeable.sol";
+import "@openzeppelin-upgradeable/contracts/security/PausableUpgradeable.sol";
 import "./interfaces/ISmartnodesMultiSig.sol";
 
-contract SmartnodesCore is ERC20Upgradeable {
+contract SmartnodesCore is
+    ERC20Upgradeable,
+    ReentrancyGuardUpgradeable,
+    PausableUpgradeable
+{
     ISmartnodesMultiSig public validatorContract;
     address public proxyAdmin;
 
-    uint256 public tailEmission = 8e18; // a relative number as the state-time can be adjusted. Equivalent to
+    uint256 public tailEmission = 64e18;
     uint256 public constant UNLOCK_PERIOD = 1_209_600; // 14 days in seconds
 
     uint256 public emissionRate;
@@ -16,10 +22,8 @@ contract SmartnodesCore is ERC20Upgradeable {
     uint256 public halvingPeriod;
     uint256 public statesSinceLastHalving;
     uint256 public totalLocked;
-    uint256 public unlockPeriod;
 
     struct Validator {
-        address _address;
         uint256 locked;
         uint256 unlockTime;
         bytes32 publicKeyHash;
@@ -30,22 +34,21 @@ contract SmartnodesCore is ERC20Upgradeable {
         uint256 payment;
     }
 
-    mapping(bytes32 => uint256) public jobHashToId;
-    mapping(uint256 => Job) public jobs;
-    mapping(uint256 => Validator) public validators;
-    mapping(address => uint256) public validatorIdByAddress;
+    mapping(bytes32 => Job) public jobs;
+    mapping(address => Validator) public validators;
+    mapping(address => uint256) public unclaimedRewards;
 
     uint256 public jobCounter;
+    uint24 public validatorCounter;
     uint256 public userCounter;
-    uint256 public validatorCounter;
-    uint256 public availableCapacity;
 
     event TokensLocked(address validator, uint256 amount);
     event UnlockInitiated(address indexed validator, uint256 unlockTime);
     event TokensUnlocked(address indexed validator, uint256 amount);
-    event JobRequested(uint256 jobId, bytes32 jobHash, bytes32 userHash);
-    event JobCompleted(uint256 jobId, bytes32 jobHash);
-    event JobDisputed(bytes32 indexed jobId, uint256 timestamp);
+    event JobRequested(bytes32 jobHash, bytes32 userHash);
+    event JobCompleted(bytes32 jobHash);
+    event JobDisputed(bytes32 indexed jobHash, uint256 timestamp);
+    event RewardsClaimed(address indexed sender, uint256 amount);
 
     modifier onlyValidatorMultiSig() {
         require(
@@ -62,13 +65,18 @@ contract SmartnodesCore is ERC20Upgradeable {
 
     function initialize(address[] memory _genesisNodes) public initializer {
         __ERC20_init("Smartnodes", "SNO");
+        __ReentrancyGuard_init();
+        __Pausable_init();
+
         proxyAdmin = msg.sender;
+
+        // Set initial values with validation
         emissionRate = 2048e18;
         lockAmount = 500_000e18;
-        halvingPeriod = 8742; // 364.25 * 24
-        statesSinceLastHalving = 0;
-        unlockPeriod = 1_209_600; // (14 days in seconds)
+        halvingPeriod = 8742; // 364.25 * 24 (once a year if done every hour)
 
+        tailEmission = 64e18;
+        statesSinceLastHalving = 0;
         jobCounter = 1;
         validatorCounter = 1;
         userCounter = 1;
@@ -76,30 +84,6 @@ contract SmartnodesCore is ERC20Upgradeable {
         for (uint i = 0; i < _genesisNodes.length; i++) {
             _mint(_genesisNodes[i], lockAmount);
         }
-    }
-
-    function setValidatorContract(address _validatorAddress) external {
-        require(
-            address(validatorContract) == address(0),
-            "Validator address already set."
-        );
-        validatorContract = ISmartnodesMultiSig(_validatorAddress);
-    }
-
-    function halveStateTime() external onlyProxyAdmin {
-        // By reducing the state time in half, we must reduce emissions (ie. state reward)
-        // by half, including the tail emission value
-        tailEmission /= 2;
-        emissionRate /= 2;
-        halvingPeriod *= 2; // Double the state updates requied between halvings
-        validatorContract.halvePeriod(); // Halve the time required between state updates
-    }
-
-    function doubleStateTime() external onlyProxyAdmin {
-        tailEmission *= 2;
-        emissionRate *= 2;
-        halvingPeriod /= 2; // Double the state updates requied between halvings
-        validatorContract.doublePeriod(); // Halve the time required between state updates
     }
 
     // Request a job and associate a payment with it
@@ -138,67 +122,94 @@ contract SmartnodesCore is ERC20Upgradeable {
     function completeJob(
         bytes32 jobHash
     ) external onlyValidatorMultiSig returns (uint256) {
-        uint256 jobId = jobHashToId[jobHash];
+        // Get the job and calculate reward
+        Job memory job = jobs[jobHash];
 
-        // If we have a user-requested job
-        if (jobId == 0) {
-            // If not, we can log the job counter
+        // If we have free a p2p-requested job, update counter
+        if (job.payment == 0) {
             jobCounter++;
-            emit JobCompleted(jobId, jobHash);
+            emit JobCompleted(jobHash);
             return 0;
         }
 
-        // Get the job and calculate reward
-        Job memory job = jobs[jobId];
         uint256 totalReward = job.payment;
-
-        // Cleanup
-        delete jobs[jobId];
-        delete jobHashToId[jobHash];
-        emit JobCompleted(jobId, jobHash);
+        delete jobs[jobHash];
+        emit JobCompleted(jobHash);
         return totalReward;
     }
 
-    function mintTokens(
+    /**
+     * @notice Records rewards for later claiming by workers/validators thru mint function
+     */
+    function recordRewards(
         address[] memory _workers,
         uint256[] memory _capacities,
         uint256 _totalCapacity,
         address[] memory _validatorsVoted,
         uint256 additionalReward
-    ) external onlyValidatorMultiSig {
+    ) external onlyValidatorMultiSig nonReentrant whenNotPaused {
+        require(_workers.length == _capacities.length, "Length mismatch");
+        require(_validatorsVoted.length > 0, "No validators");
+        require(_totalCapacity > 0 || _workers.length == 0, "Invalid capacity");
+
         if (statesSinceLastHalving >= halvingPeriod) {
+            // If we have hit the halving period, reduce the reward by half
             if (emissionRate > tailEmission) {
                 emissionRate /= 2;
             }
+            statesSinceLastHalving = 0;
         }
 
+        // Calculate total amount to allocate to workers and validators
         uint256 validatorReward;
         uint256 workerReward;
+        uint256 totalReward = emissionRate + additionalReward;
 
         if (_workers.length == 0) {
-            validatorReward = emissionRate + additionalReward;
+            validatorReward = totalReward;
             workerReward = 0;
         } else {
-            validatorReward = ((emissionRate + additionalReward) * 25) / 100;
-            workerReward = ((emissionRate + additionalReward) * 75) / 100;
+            validatorReward = (totalReward * 20) / 100;
+            workerReward = totalReward - validatorReward;
         }
 
+        // Record validator rewards
+        uint256 validatorShare = validatorReward / _validatorsVoted.length;
         for (uint256 v = 0; v < _validatorsVoted.length; v++) {
-            _mint(
-                _validatorsVoted[v],
-                validatorReward / _validatorsVoted.length
-            );
+            address validator = _validatorsVoted[v];
+            unclaimedRewards[validator] += validatorShare;
         }
 
+        // Record worker rewards
         if (_workers.length > 0) {
-            for (uint256 w = 0; w < _workers.length; w++) {
-                uint256 reward = ((_capacities[w] * workerReward) /
-                    _totalCapacity);
-                _mint(_workers[w], reward);
+            uint256 remainingWorkerReward = workerReward;
+            for (uint256 i = 0; i < _workers.length - 1; i++) {
+                address worker = _workers[i];
+                uint256 reward = (_capacities[i] * workerReward) /
+                    _totalCapacity;
+                unclaimedRewards[worker] += reward;
+                remainingWorkerReward -= reward;
             }
+            // Give remaining reward to last worker to handle rounding
+            unclaimedRewards[
+                _workers[_workers.length - 1]
+            ] += remainingWorkerReward;
         }
 
         statesSinceLastHalving++;
+    }
+
+    /**
+     * @notice Allows users to claim their accumulated rewards
+     */
+    function claimRewards() external {
+        uint256 amount = unclaimedRewards[msg.sender];
+        require(amount > 0, "No rewards to claim");
+
+        unclaimedRewards[msg.sender] = 0;
+        _mint(msg.sender, amount);
+
+        emit RewardsClaimed(msg.sender, amount);
     }
 
     /**
@@ -207,12 +218,13 @@ contract SmartnodesCore is ERC20Upgradeable {
     function _lockTokens(address sender, uint256 amount) internal {
         require(amount > 0, "Amount must be greater than zero.");
         require(balanceOf(sender) >= amount, "Insufficient balance.");
-
-        uint256 validatorId = validatorIdByAddress[sender];
-        require(validatorId != 0, "Validator does not exist.");
+        require(
+            validators[sender].publicKeyHash != bytes32(0),
+            "Validator does not exist."
+        );
 
         transferFrom(sender, address(this), amount);
-        validators[validatorId].locked += amount;
+        validators[sender].locked += amount;
         totalLocked += amount;
 
         emit TokensLocked(sender, amount);
@@ -222,12 +234,12 @@ contract SmartnodesCore is ERC20Upgradeable {
         _lockTokens(msg.sender, amount);
     }
 
-    function unlockTokens(uint256 amount) external {
-        uint256 validatorId = validatorIdByAddress[msg.sender];
-        require(validatorId > 0, "Not a registered validator.");
-
-        Validator storage validator = validators[validatorId];
-
+    function unlockTokens(uint256 amount) external nonReentrant {
+        Validator storage validator = validators[msg.sender];
+        require(
+            validators[msg.sender].publicKeyHash != bytes32(0),
+            "Validator does not exist."
+        );
         require(amount <= validator.locked, "Amount exceeds locked balance.");
         require(amount > 0, "Amount must be greater than zero.");
 
@@ -236,7 +248,7 @@ contract SmartnodesCore is ERC20Upgradeable {
             if (validator.locked < lockAmount) {
                 validatorContract.removeValidator(msg.sender);
             }
-            validator.unlockTime = block.timestamp + unlockPeriod; // unlocking period
+            validator.unlockTime = block.timestamp + UNLOCK_PERIOD; // unlocking period
 
             // Update multisig validator
             totalLocked -= amount;
@@ -250,8 +262,7 @@ contract SmartnodesCore is ERC20Upgradeable {
             );
 
             validator.locked -= amount;
-            transferFrom(address(this), msg.sender, amount); // Mint tokens back to the validator's address
-
+            _transfer(address(this), msg.sender, amount);
             emit TokensUnlocked(msg.sender, amount); // Optional: emit an event when tokens are unlocked
         }
     }
@@ -265,26 +276,29 @@ contract SmartnodesCore is ERC20Upgradeable {
             "Insufficient token balance."
         );
         require(
-            validatorIdByAddress[msg.sender] == 0,
+            validators[msg.sender].publicKeyHash == bytes32(0),
             "Validator already created with this account!"
         );
 
-        validators[validatorCounter] = Validator({
-            _address: msg.sender,
+        validators[msg.sender] = Validator({
             locked: 0,
             unlockTime: 0,
             publicKeyHash: _publicKeyHash
         });
 
-        validatorIdByAddress[msg.sender] = validatorCounter;
         _lockTokens(msg.sender, lockAmount);
-
         validatorCounter++;
     }
 
     function isLocked(address validatorAddress) external view returns (bool) {
-        uint256 id = validatorIdByAddress[validatorAddress];
-        return validators[id].locked >= lockAmount;
+        return validators[validatorAddress].locked >= lockAmount;
+    }
+
+    /**
+     * @notice View function to check unclaimed rewards
+     */
+    function getUnclaimedRewards(address user) external view returns (uint256) {
+        return unclaimedRewards[user];
     }
 
     function getActiveValidatorCount() external view returns (uint256) {
@@ -292,13 +306,38 @@ contract SmartnodesCore is ERC20Upgradeable {
     }
 
     function getValidatorInfo(
-        uint256 _validatorId
-    ) external view returns (bool, bytes32, address) {
-        require(_validatorId < validatorCounter, "Invalid ID.");
-        Validator memory _validator = validators[_validatorId];
-        bool isActive = validatorContract.isActiveValidator(
-            _validator._address
+        address validatorAddress
+    ) external view returns (bool, bytes32) {
+        Validator memory _validator = validators[validatorAddress];
+        bool isActive = validatorContract.isActiveValidator(validatorAddress);
+        return (isActive, _validator.publicKeyHash);
+    }
+
+    function setValidatorContract(address _validatorAddress) external {
+        require(
+            address(validatorContract) == address(0),
+            "Validator address already set."
         );
-        return (isActive, _validator.publicKeyHash, _validator._address);
+        validatorContract = ISmartnodesMultiSig(_validatorAddress);
+    }
+
+    function halveStateTime() external onlyProxyAdmin {
+        // By reducing the state time in half, we must reduce emissions (ie. state reward)
+        // by half, including the tail emission value
+        tailEmission /= 2;
+        emissionRate /= 2;
+        halvingPeriod *= 2; // Double the state updates requied between halvings
+        validatorContract.halvePeriod(); // Halve the time required between state updates
+    }
+
+    function doubleStateTime() external onlyProxyAdmin {
+        tailEmission *= 2;
+        emissionRate *= 2;
+        halvingPeriod /= 2; // Double the state updates requied between halvings
+        validatorContract.doublePeriod(); // Halve the time required between state updates
+    }
+
+    function changeLockAmount(uint256 amount) external onlyProxyAdmin {
+        lockAmount = amount;
     }
 }

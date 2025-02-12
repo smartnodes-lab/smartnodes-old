@@ -5,8 +5,7 @@ dependencies:
 compiler:
   solc:
     remappings:
-      - "@openzeppelin-2=OpenZeppelin/openzeppelin-contracts@4.8.0"
-      - "@openzeppelin=OpenZeppelin/openzeppelin-contracts-upgradeable@4.5.0"
+      - "@openzeppelin=OpenZeppelin/openzeppelin-contracts@4.8.0"
       - "@openzeppelin-upgradeable=OpenZeppelin/openzeppelin-contracts-upgradeable@4.5.0"
       - "@chainlink=smartcontractkit/chainlink-brownie-contracts@1.1.0"
 networks:
@@ -14,6 +13,8 @@ networks:
   base-sepolia:
     host: https://base-sepolia.infura.io/v3/4bb158409bfe45d49cea535f20975671
     chainid: 84532
+    explorer: https://api-sepolia.basescan.org/api
+    api_key: PKZVAQ2XZ5CBPT3IID6U61D8UDP3WMMYS1
 dotenv: .env
 wallets:
   from_key: ${PRIVATE_KEY}

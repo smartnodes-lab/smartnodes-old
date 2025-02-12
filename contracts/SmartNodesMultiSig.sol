@@ -3,6 +3,7 @@ pragma solidity ^0.8.5;
 
 import "@openzeppelin-upgradeable/contracts/proxy/utils/Initializable.sol";
 import "@openzeppelin-upgradeable/contracts/interfaces/IERC20Upgradeable.sol";
+import "@openzeppelin-upgradeable/contracts/security/ReentrancyGuardUpgradeable.sol";
 import "./interfaces/ISmartnodesCore.sol";
 
 /** 
@@ -10,13 +11,13 @@ import "./interfaces/ISmartnodesCore.sol";
     * @dev A multi-signature contract composed of Smartnodes validators responsible for
      managing the Core contract
 */
-contract SmartnodesMultiSig is Initializable {
+contract SmartnodesMultiSig is Initializable, ReentrancyGuardUpgradeable {
     // State update constraints
-    uint256 public updateTime = 3600; // 60 minutes minimum required between state updates
+    uint256 public updateTime = 1800; // 30 minutes minimum required between state updates
+    uint256 public roundExpirationTime = 3600; // 60 minutes until proposal expires
     uint256 public requiredApprovalsPercentage;
     uint256 public requiredApprovals;
-    uint256 public maxStateUpdates; // Maximum number of function calls per proposal
-    uint256 public lastProposalTime; // time of last proposal
+    uint256 public lastProposalTime; // time of last executed proposal
     uint256 public nextProposalId;
 
     // Metadata and bytecode for SmartNodes calls
@@ -30,45 +31,67 @@ contract SmartnodesMultiSig is Initializable {
     bytes32[] public currentProposals;
     uint8[] public readyProposals;
 
+    // Added mapping to track proposal creation times
     mapping(address => bool) public isValidator;
     mapping(address => uint8) public hasSubmittedProposal;
     mapping(address => uint8) public hasVoted;
     mapping(uint8 => uint256) public proposalVotes;
 
-    event ProposalExecuted(uint256 proposalId, bytes32 proposalHash);
+    event ProposalExecuted(
+        uint256 indexed proposalId,
+        bytes32 proposalHash,
+        uint256[] networkCapacities,
+        uint256 workers
+    );
+    event ProposalExpired(uint256 proposalId);
     event Deposit(address indexed sender, uint amount);
     event ValidatorAdded(address validator);
     event ValidatorRemoved(address validator);
 
+    /**
+     * @dev Ensures caller is a registered validator
+     */
     modifier onlyValidator() {
-        require(
-            isValidator[msg.sender],
-            "Caller is not a Smartnodes Validator!"
-        );
+        require(isValidator[msg.sender], "Not a validator");
         _;
     }
 
+    /**
+     * @dev Ensures caller is the core contract
+     */
     modifier onlySmartnodesCore() {
-        require(
-            msg.sender == smartnodesContractAddress,
-            "Caller must be the SmartnodesMultiSig."
-        );
+        require(msg.sender == smartnodesContractAddress, "Not core contract");
         _;
     }
 
-    modifier onlySelectedValidator() {
+    /**
+     * @dev Allows only current round validators, or any validator if round has expired.
+     */
+    modifier onlyEligibleValidator() {
+        bool isSelectedValidator = _isCurrentRoundValidator(msg.sender);
+        bool _isRoundExpired = _isCurrentRoundExpired();
+
         require(
-            _isCurrentRoundValidator(msg.sender) ||
-                currentRoundValidators.length == 0,
-            "Caller is not a selected validator for this round!"
+            isSelectedValidator || (isValidator[msg.sender] && _isRoundExpired),
+            "Not eligible to submit proposal."
         );
+
         require(
             hasSubmittedProposal[msg.sender] == 0,
-            "Validator has already submitted a proposal this round!"
+            "Validator has already submitted a proposal this round."
         );
+
+        if (_isRoundExpired) {
+            _cleanupExpiredRound();
+        }
+
         _;
     }
 
+    /**
+     * @notice Initializes the contract
+     * @param target Address of the SmartNodes core contract
+     */
     function initialize(
         address target // Address of the main contract (Smart Nodes)
     )
@@ -78,13 +101,11 @@ contract SmartnodesMultiSig is Initializable {
         initializer
     {
         smartnodesContractAddress = target;
-
-        maxStateUpdates = 30;
-        updateTime = 3600;
-
+        updateTime = 1800;
+        roundExpirationTime = 3600; // 1 hour until proposal expires
         _smartnodesContractInstance = ISmartnodesCore(target);
 
-        lastProposalTime = 0; // time of last proposal
+        lastProposalTime = 0;
         requiredApprovalsPercentage = 66;
         nValidators = 1;
         nextProposalId = 0;
@@ -99,19 +120,57 @@ contract SmartnodesMultiSig is Initializable {
      */
     function createProposal(
         bytes32 proposalHash
-    ) external onlySelectedValidator {
+    ) external onlyEligibleValidator nonReentrant {
+        // Only allow proposals starting 5m from update window
         require(
-            block.timestamp - lastProposalTime >= updateTime,
-            "Proposals must be submitted 0-10 mins after last executed proposal!"
-        );
-        require(
-            hasSubmittedProposal[msg.sender] == 0,
-            "Validator has already submitted a proposal"
+            block.timestamp - lastProposalTime >= updateTime - 120,
+            "Proposal must be submitted updateTime - 2mins after last execution"
         );
 
         currentProposals.push(proposalHash);
         uint8 proposalNum = uint8(currentProposals.length);
         hasSubmittedProposal[msg.sender] = proposalNum;
+    }
+
+    /**
+     * @notice Internal function to clean up expired round
+     */
+    function _cleanupExpiredRound() internal {
+        // Reset all validator states
+        for (uint256 i = 0; i < validators.length; i++) {
+            hasVoted[validators[i]] = 0;
+            hasSubmittedProposal[validators[i]] = 0;
+        }
+
+        // Clear all proposals and votes
+        while (currentProposals.length > 0) {
+            uint8 proposalNum = uint8(currentProposals.length);
+            proposalVotes[proposalNum] = 0;
+            currentProposals.pop();
+        }
+
+        // Clear ready proposals
+        delete readyProposals;
+    }
+
+    /**
+     * @notice Checks if a round has expired
+     */
+    function isRoundExpired() public view returns (bool) {
+        return block.timestamp - lastProposalTime > roundExpirationTime;
+    }
+
+    /**
+     * @notice Allows updating the proposal expiration time
+     */
+    function setProposalExpirationTime(
+        uint256 newExpirationTime
+    ) external onlySmartnodesCore {
+        require(
+            newExpirationTime >= updateTime,
+            "Expiration time must be >= update time"
+        );
+        roundExpirationTime = newExpirationTime;
     }
 
     /**
@@ -139,21 +198,27 @@ contract SmartnodesMultiSig is Initializable {
     }
 
     /**
-     * @notice Executes a proposal if it has enough approvals. Only to be called by approveTransaction
+     * @notice Executes a proposal if it has enough approvals.
      */
     function executeProposal(
         address[] memory validatorsToRemove,
         bytes32[] memory jobHashes,
         uint256[] memory jobCapacities,
         address[] memory workers,
-        uint256 totalCapacity
-    ) external onlyValidator {
+        uint256[] memory totalCapacities
+    ) external onlyValidator nonReentrant {
         uint8 proposalNum = hasSubmittedProposal[msg.sender];
         require(proposalNum > 0, "Must be a proposal creator!");
         require(
             proposalVotes[proposalNum] >= requiredApprovals,
             "Not enough proposal votes!"
         );
+
+        // totalCapacities contains total capacities of each network, we must summate them
+        uint256 totalCapacity = 0;
+        for (uint i = 0; i < totalCapacities.length; i++) {
+            totalCapacity += totalCapacities[i];
+        }
 
         bytes32 providedHash = currentProposals[proposalNum - 1];
         bytes32 proposalHash = hashProposalData(
@@ -198,7 +263,7 @@ contract SmartnodesMultiSig is Initializable {
         }
 
         // Call mint function to generate rewards for workers and validators
-        _smartnodesContractInstance.mintTokens(
+        _smartnodesContractInstance.recordRewards(
             workers,
             jobCapacities,
             totalCapacity,
@@ -206,7 +271,12 @@ contract SmartnodesMultiSig is Initializable {
             additionalReward
         );
 
-        emit ProposalExecuted(nextProposalId, proposalHash);
+        emit ProposalExecuted(
+            nextProposalId,
+            proposalHash,
+            totalCapacities,
+            workers.length
+        );
         _updateRound();
     }
 
@@ -289,6 +359,19 @@ contract SmartnodesMultiSig is Initializable {
         emit ValidatorRemoved(validator);
     }
 
+    /**
+     * @dev Checks if current round is expired
+     */
+    function _isCurrentRoundExpired() internal view returns (bool) {
+        if (block.timestamp - lastProposalTime > roundExpirationTime) {
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * @dev Checks if a validator is selected for current round
+     */
     function _isCurrentRoundValidator(
         address _validator
     ) internal view returns (bool) {

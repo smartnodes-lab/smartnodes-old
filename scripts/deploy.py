@@ -39,7 +39,7 @@ def hash_proposal_data(
 
 
 def deploy_proxy_admin(account):
-    proxy_admin = ProxyAdmin.deploy({"from": account})
+    proxy_admin = ProxyAdmin.deploy([account.address], {"from": account})
     proxy_address = proxy_admin.address
     set_key(".env", "SMARTNODES_ADMIN_ADDRESS", proxy_address)
     return proxy_admin
@@ -87,7 +87,7 @@ def initialize_contracts(account, genesis_accounts, core, multisig):
     
 
 def main():
-    account = accounts[0]
+    # account = accounts[0]
 
     # Account to deploy the proxy (proxy admin, to become a DAO of sorts)
     proxy_admin = deploy_proxy_admin(account)    
@@ -103,6 +103,9 @@ def main():
     seed_validators = [account, "0xA9c5307090c4F7d98541C7a444f1C395F2d7e135"]
 
     initialize_contracts(account, seed_validators, sno, sno_multisig)
+    
+    SmartnodesCore.publish_source(sno)
+    SmartnodesMultiSig.publish_source(sno_multisig)
 
     # Optionally, add account as validator
     sno.approve(account, 500_000e18, {"from": account})
@@ -115,7 +118,7 @@ def main():
 
 
     print("\n_________________Contract State_________________")
-    print(f"Validator: {sno.validators(1)}")
+    print(f"Validator: {sno.validators(account.address)}")
     print(f"Multisig State: {sno_multisig.getState()}")
     print(f"Outstanding Tokens: {sno.totalSupply()/1e18}\n\n")
     
@@ -144,14 +147,12 @@ def main():
         job_hashes,
         job_capacities,
         workers,
-        sum(job_capacities),
+        [sum(job_capacities)],
         {"from": account}
     )
 
-    # network.web3.provider.make_request("evm_mine", [])
-
     print("\n_________________Contract State_________________\n")
-    print(f"Validator: {sno.validators(1)}")
+    print(f"Validator: {sno.validators(account.address)}")
     print(f"Multisig State: {sno_multisig.getState()}")
     print(f"Outstanding Tokens: {sno.totalSupply()/1e18}\n\n")
 

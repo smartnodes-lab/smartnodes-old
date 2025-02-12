@@ -13,7 +13,7 @@ interface ISmartnodesCore {
     function disputeJob(uint256 jobId) external;
     function lockTokens(uint32 amou256) external;
     function unlockTokens(uint256 amount) external;
-    function mintTokens(
+    function recordRewards(
         address[] memory _workers,
         uint256[] memory _workerCapacities,
         uint256 _totalCapacity,
@@ -30,11 +30,13 @@ interface ISmartnodesCore {
     function getSupply() external view returns (uint256);
     function isLocked(address validatorAddr) external view returns (bool);
     function getValidatorInfo(
-        uint256 _validatorId
-    ) external view returns (bool, bytes32, address);
+        address validatorAddress
+    ) external view returns (bool, bytes32);
     function getValidatorBytes(
         address validatorAddress
     ) external view returns (bytes32);
+    function claimRewards() external;
+    function getUnclaimedRewards(address user) external view;
     function getState()
         external
         view
