@@ -4,207 +4,289 @@ pragma solidity ^0.8.5;
 import "@openzeppelin-upgradeable/contracts/token/ERC20/ERC20Upgradeable.sol";
 import "@openzeppelin-upgradeable/contracts/security/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelin-upgradeable/contracts/security/PausableUpgradeable.sol";
+import "@openzeppelin-upgradeable/contracts/access/OwnableUpgradeable.sol";
 import "./interfaces/ISmartnodesMultiSig.sol";
 
 contract SmartnodesCore is
     ERC20Upgradeable,
     ReentrancyGuardUpgradeable,
-    PausableUpgradeable
+    PausableUpgradeable,
+    OwnableUpgradeable
 {
+    error InsufficientBalance();
+    error InvalidAmount();
+    error InvalidCapacity();
+    error InvalidLength();
+    error NoValidators();
+    error NoRewards();
+    error TokensStillLocked();
+    error ValidatorNotFound();
+    error UnauthorizedCaller();
+    error ZeroAddress();
+    error ValidatorAlreadyExists();
+    error ContractAlreadyInitialized();
+    error StateUpdateTooFrequent();
+
     ISmartnodesMultiSig public validatorContract;
     address public proxyAdmin;
 
-    uint256 public tailEmission = 64e18;
     uint256 public constant UNLOCK_PERIOD = 1_209_600; // 14 days in seconds
+    uint256 public constant VALIDATOR_REWARD_PERCENTAGE = 20;
+    uint256 public constant INITIAL_LOCK_AMOUNT = 500_000e18;
+    uint256 public constant INITIAL_EMISSION_RATE = 2048e18;
+    uint256 public constant MIN_STATE_UPDATE_INTERVAL = 1 hours;
 
+    uint256 public halvingPeriod = 8742; // 364.25 * 24
+    uint256 public tailEmission = 64e18;
     uint256 public emissionRate;
-    uint256 public lockAmount;
-    uint256 public halvingPeriod;
     uint256 public statesSinceLastHalving;
     uint256 public totalLocked;
+    uint256 public jobCounter;
+    uint24 public validatorCounter;
+    uint256 public lockAmount;
+    uint256 public lastStateUpdateTimestamp;
 
     struct Validator {
         uint256 locked;
-        uint256 unlockTime;
+        uint256 unlockTime; // Changed from uint24 to uint256 for timestamp compatibility
         bytes32 publicKeyHash;
+        bool exists;
     }
 
     struct Job {
         uint256[] capacities;
         uint256 payment;
+        bool exists;
+        address requester;
     }
 
     mapping(bytes32 => Job) public jobs;
     mapping(address => Validator) public validators;
     mapping(address => uint256) public unclaimedRewards;
 
-    uint256 public jobCounter;
-    uint24 public validatorCounter;
-    uint256 public userCounter;
-
-    event TokensLocked(address validator, uint256 amount);
+    event TokensLocked(address indexed validator, uint256 amount);
     event UnlockInitiated(address indexed validator, uint256 unlockTime);
     event TokensUnlocked(address indexed validator, uint256 amount);
-    event JobRequested(bytes32 jobHash, bytes32 userHash);
-    event JobCompleted(bytes32 jobHash);
-    event JobDisputed(bytes32 indexed jobHash, uint256 timestamp);
+    event JobRequested(
+        bytes32 indexed jobHash,
+        bytes32 userHash,
+        address indexed requester
+    );
+    event JobCompleted(bytes32 indexed jobHash, uint256 reward);
+    event JobCancelled(bytes32 indexed jobHash, address indexed requester);
     event RewardsClaimed(address indexed sender, uint256 amount);
+    event StateUpdate(
+        uint256[] networkCapacities,
+        uint64 activeWorkers,
+        uint64 activeValidators,
+        uint64 activeUsers,
+        uint64 activeJobs,
+        uint64 numWorkers,
+        uint64 numValidators,
+        uint64 numUsers
+    );
+    event EmissionRateUpdated(uint256 newRate);
+    event ValidatorContractSet(address indexed validatorContract);
+    event LockAmountChanged(uint256 newAmount);
 
     modifier onlyValidatorMultiSig() {
-        require(
-            msg.sender == address(validatorContract),
-            "Caller must be the SmartnodesMultiSig."
-        );
+        if (msg.sender != address(validatorContract))
+            revert UnauthorizedCaller();
         _;
     }
 
     modifier onlyProxyAdmin() {
-        require(msg.sender == proxyAdmin, "Caller must be the proxy admin.");
+        if (msg.sender != proxyAdmin) revert UnauthorizedCaller();
         _;
     }
 
-    function initialize(address[] memory _genesisNodes) public initializer {
+    modifier ensureStateUpdateInterval() {
+        if (
+            block.timestamp <
+            lastStateUpdateTimestamp + MIN_STATE_UPDATE_INTERVAL
+        ) {
+            revert StateUpdateTooFrequent();
+        }
+        _;
+    }
+
+    function initialize(address[] memory _genesisNodes) external initializer {
         __ERC20_init("Smartnodes", "SNO");
         __ReentrancyGuard_init();
         __Pausable_init();
+        __Ownable_init();
 
         proxyAdmin = msg.sender;
+        emissionRate = INITIAL_EMISSION_RATE;
+        lockAmount = INITIAL_LOCK_AMOUNT;
 
-        // Set initial values with validation
-        emissionRate = 2048e18;
-        lockAmount = 500_000e18;
-        halvingPeriod = 8742; // 364.25 * 24 (once a year if done every hour)
-
-        tailEmission = 64e18;
-        statesSinceLastHalving = 0;
         jobCounter = 1;
         validatorCounter = 1;
-        userCounter = 1;
+        lastStateUpdateTimestamp = 1;
 
-        for (uint i = 0; i < _genesisNodes.length; i++) {
-            _mint(_genesisNodes[i], lockAmount);
+        for (uint i = 0; i < _genesisNodes.length; ) {
+            if (_genesisNodes[i] == address(0)) revert ZeroAddress();
+            _mint(_genesisNodes[i], INITIAL_LOCK_AMOUNT);
+            unchecked {
+                ++i;
+            }
         }
     }
 
-    // Request a job and associate a payment with it
-    // function requestJob(
-    //     bytes32 userHash,
-    //     bytes32 jobHash,
-    //     uint256[] calldata capacities,
-    //     uint256 paymentAmount // Accept payment in tokens
-    // ) external {
-    //     require(jobHashToId[jobHash] == 0, "Job already created!");
-    //     require(capacities.length > 0, "Job must have a capacity.");
-    //     jobHashToId[jobHash] = jobCounter;
+    function requestJob(
+        bytes32 userHash,
+        bytes32 jobHash,
+        uint256[] calldata capacities,
+        uint256 paymentAmount
+    ) external whenNotPaused {
+        if (capacities.length == 0) revert InvalidCapacity();
+        if (paymentAmount == 0) revert InvalidAmount();
+        if (balanceOf(msg.sender) < paymentAmount) revert InsufficientBalance();
+        if (jobs[jobHash].exists) revert("Job already exists");
 
-    //     // Require a payment for the job
-    //     require(paymentAmount > 0, "Payment must be greater than zero.");
-    //     require(
-    //         balanceOf(msg.sender) >= paymentAmount,
-    //         "Insufficient token balance."
-    //     );
-    //     require(capacities.length > 0, "");
+        // Transfer the payment tokens to contract instead of burning
+        _transfer(msg.sender, address(this), paymentAmount);
 
-    //     // Transfer the payment tokens and burn them
-    //     _transfer(msg.sender, address(0), paymentAmount); // Burn the tokens by sending to zero address
+        jobs[jobHash] = Job({
+            capacities: capacities,
+            payment: paymentAmount,
+            exists: true,
+            requester: msg.sender
+        });
 
-    //     // Store the job with associated payment
-    //     jobs[jobCounter] = Job({
-    //         capacities: capacities,
-    //         payment: paymentAmount // Store the payment amount
-    //     });
+        emit JobRequested(jobHash, userHash, msg.sender);
+        unchecked {
+            ++jobCounter;
+        }
+    }
 
-    //     emit JobRequested(jobCounter, jobHash, userHash);
-    //     jobCounter++;
-    // }
+    function cancelJob(bytes32 jobHash) external whenNotPaused nonReentrant {
+        Job storage job = jobs[jobHash];
+        if (!job.exists) revert InvalidAmount();
+        if (job.requester != msg.sender) revert UnauthorizedCaller();
 
-    // Complete the job and distribute payment to validators/workers
+        uint256 payment = job.payment;
+        delete jobs[jobHash];
+
+        // Return tokens instead of minting new ones
+        _transfer(address(this), msg.sender, payment);
+
+        emit JobCancelled(jobHash, msg.sender);
+    }
+
     function completeJob(
         bytes32 jobHash
-    ) external onlyValidatorMultiSig returns (uint256) {
-        // Get the job and calculate reward
+    ) public onlyValidatorMultiSig whenNotPaused returns (uint256) {
         Job memory job = jobs[jobHash];
-
-        // If we have free a p2p-requested job, update counter
-        if (job.payment == 0) {
-            jobCounter++;
-            emit JobCompleted(jobHash);
-            return 0;
-        }
+        if (!job.exists) return 0;
 
         uint256 totalReward = job.payment;
         delete jobs[jobHash];
-        emit JobCompleted(jobHash);
+
+        emit JobCompleted(jobHash, totalReward);
         return totalReward;
     }
 
-    /**
-     * @notice Records rewards for later claiming by workers/validators thru mint function
-     */
-    function recordRewards(
+    function updateContract(
+        bytes32[] memory jobHashes,
+        address[] memory _workers,
+        uint256[] memory _capacities,
+        uint256 _totalCapacity,
+        address[] memory _validatorsVoted
+    )
+        external
+        onlyValidatorMultiSig
+        nonReentrant
+        ensureStateUpdateInterval
+        whenNotPaused
+    {
+        if (_workers.length != _capacities.length) revert InvalidLength();
+        if (_validatorsVoted.length == 0) revert NoValidators();
+        if (_totalCapacity == 0 && _workers.length > 0)
+            revert InvalidCapacity();
+
+        // Update emission rate if needed
+        if (statesSinceLastHalving >= halvingPeriod) {
+            if (emissionRate > tailEmission) {
+                emissionRate /= 2;
+                emit EmissionRateUpdated(emissionRate);
+            }
+            statesSinceLastHalving = 0;
+        }
+
+        // Process rewards
+        uint256 additionalReward = _processCompletedJobs(jobHashes);
+        _distributeRewards(
+            _workers,
+            _capacities,
+            _totalCapacity,
+            _validatorsVoted,
+            additionalReward
+        );
+
+        unchecked {
+            ++statesSinceLastHalving;
+        }
+    }
+
+    function _processCompletedJobs(
+        bytes32[] memory jobHashes
+    ) internal returns (uint256) {
+        uint256 additionalReward = 0;
+        for (uint i = 0; i < jobHashes.length; ) {
+            additionalReward += completeJob(jobHashes[i]);
+            unchecked {
+                ++i;
+            }
+        }
+        return additionalReward;
+    }
+
+    function _distributeRewards(
         address[] memory _workers,
         uint256[] memory _capacities,
         uint256 _totalCapacity,
         address[] memory _validatorsVoted,
         uint256 additionalReward
-    ) external onlyValidatorMultiSig nonReentrant whenNotPaused {
-        require(_workers.length == _capacities.length, "Length mismatch");
-        require(_validatorsVoted.length > 0, "No validators");
-        require(_totalCapacity > 0 || _workers.length == 0, "Invalid capacity");
-
-        if (statesSinceLastHalving >= halvingPeriod) {
-            // If we have hit the halving period, reduce the reward by half
-            if (emissionRate > tailEmission) {
-                emissionRate /= 2;
-            }
-            statesSinceLastHalving = 0;
-        }
-
-        // Calculate total amount to allocate to workers and validators
+    ) internal {
+        uint256 totalReward = emissionRate + additionalReward;
         uint256 validatorReward;
         uint256 workerReward;
-        uint256 totalReward = emissionRate + additionalReward;
 
         if (_workers.length == 0) {
             validatorReward = totalReward;
-            workerReward = 0;
         } else {
-            validatorReward = (totalReward * 20) / 100;
+            validatorReward = (totalReward * VALIDATOR_REWARD_PERCENTAGE) / 100;
             workerReward = totalReward - validatorReward;
         }
 
-        // Record validator rewards
-        uint256 validatorShare = validatorReward / _validatorsVoted.length;
-        for (uint256 v = 0; v < _validatorsVoted.length; v++) {
-            address validator = _validatorsVoted[v];
-            unclaimedRewards[validator] += validatorShare;
+        // Distribute validator rewards
+        if (_validatorsVoted.length > 0) {
+            uint256 validatorShare = validatorReward / _validatorsVoted.length;
+            for (uint256 i = 0; i < _validatorsVoted.length; ) {
+                unclaimedRewards[_validatorsVoted[i]] += validatorShare;
+                unchecked {
+                    ++i;
+                }
+            }
         }
 
-        // Record worker rewards
+        // Distribute worker rewards
         if (_workers.length > 0) {
-            uint256 remainingWorkerReward = workerReward;
-            for (uint256 i = 0; i < _workers.length - 1; i++) {
-                address worker = _workers[i];
+            for (uint256 i = 0; i < _workers.length; ) {
                 uint256 reward = (_capacities[i] * workerReward) /
                     _totalCapacity;
-                unclaimedRewards[worker] += reward;
-                remainingWorkerReward -= reward;
+                unclaimedRewards[_workers[i]] += reward;
+                unchecked {
+                    ++i;
+                }
             }
-            // Give remaining reward to last worker to handle rounding
-            unclaimedRewards[
-                _workers[_workers.length - 1]
-            ] += remainingWorkerReward;
         }
-
-        statesSinceLastHalving++;
     }
 
-    /**
-     * @notice Allows users to claim their accumulated rewards
-     */
-    function claimRewards() external {
+    function claimRewards() external nonReentrant {
         uint256 amount = unclaimedRewards[msg.sender];
-        require(amount > 0, "No rewards to claim");
+        if (amount == 0) revert NoRewards();
 
         unclaimedRewards[msg.sender] = 0;
         _mint(msg.sender, amount);
@@ -236,6 +318,7 @@ contract SmartnodesCore is
 
     function unlockTokens(uint256 amount) external nonReentrant {
         Validator storage validator = validators[msg.sender];
+
         require(
             validators[msg.sender].publicKeyHash != bytes32(0),
             "Validator does not exist."
@@ -283,7 +366,8 @@ contract SmartnodesCore is
         validators[msg.sender] = Validator({
             locked: 0,
             unlockTime: 0,
-            publicKeyHash: _publicKeyHash
+            publicKeyHash: _publicKeyHash,
+            exists: true
         });
 
         _lockTokens(msg.sender, lockAmount);

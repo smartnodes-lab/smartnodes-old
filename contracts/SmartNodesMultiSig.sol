@@ -37,14 +37,9 @@ contract SmartnodesMultiSig is Initializable, ReentrancyGuardUpgradeable {
     mapping(address => uint8) public hasVoted;
     mapping(uint8 => uint256) public proposalVotes;
 
-    event ProposalExecuted(
-        uint256 indexed proposalId,
-        bytes32 proposalHash,
-        uint256[] networkCapacities,
-        uint256 workers
-    );
+    event ProposalExecuted(uint256 proposalId, bytes32 proposalHash);
     event ProposalExpired(uint256 proposalId);
-    event Deposit(address indexed sender, uint amount);
+    event Deposit(address sender, uint amount);
     event ValidatorAdded(address validator);
     event ValidatorRemoved(address validator);
 
@@ -204,9 +199,10 @@ contract SmartnodesMultiSig is Initializable, ReentrancyGuardUpgradeable {
         address[] memory validatorsToRemove,
         bytes32[] memory jobHashes,
         uint256[] memory jobCapacities,
-        address[] memory workers,
-        uint256[] memory totalCapacities
-    ) external onlyValidator nonReentrant {
+        address[] memory jobWorkers,
+        uint256[] memory totalCapacities,
+        uint256[] memory totalWorkers
+    ) external onlyValidator {
         uint8 proposalNum = hasSubmittedProposal[msg.sender];
         require(proposalNum > 0, "Must be a proposal creator!");
         require(
@@ -225,9 +221,10 @@ contract SmartnodesMultiSig is Initializable, ReentrancyGuardUpgradeable {
             validatorsToRemove,
             jobHashes,
             jobCapacities,
-            workers,
+            jobWorkers,
             totalCapacity
         );
+
         require(
             proposalHash == providedHash,
             "Proposal data doesn't match initial hash!"
@@ -236,17 +233,6 @@ contract SmartnodesMultiSig is Initializable, ReentrancyGuardUpgradeable {
         if (validatorsToRemove.length > 0) {
             for (uint i = 0; i < validatorsToRemove.length; i++) {
                 _removeValidator(validatorsToRemove[i]);
-            }
-        }
-
-        uint256 additionalReward = 0;
-
-        if (jobHashes.length > 0) {
-            for (uint i = 0; i < jobHashes.length; i++) {
-                uint256 reward = _smartnodesContractInstance.completeJob(
-                    jobHashes[i]
-                );
-                additionalReward += reward;
             }
         }
 
@@ -263,20 +249,16 @@ contract SmartnodesMultiSig is Initializable, ReentrancyGuardUpgradeable {
         }
 
         // Call mint function to generate rewards for workers and validators
-        _smartnodesContractInstance.recordRewards(
-            workers,
+        _smartnodesContractInstance.updateContract(
+            jobHashes,
+            jobWorkers,
             jobCapacities,
             totalCapacity,
-            _approvedValidators,
-            additionalReward
+            _approvedValidators
         );
 
-        emit ProposalExecuted(
-            nextProposalId,
-            proposalHash,
-            totalCapacities,
-            workers.length
-        );
+        emit ProposalExecuted(nextProposalId, proposalHash);
+
         _updateRound();
     }
 

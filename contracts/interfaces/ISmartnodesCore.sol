@@ -13,12 +13,12 @@ interface ISmartnodesCore {
     function disputeJob(uint256 jobId) external;
     function lockTokens(uint32 amou256) external;
     function unlockTokens(uint256 amount) external;
-    function recordRewards(
+    function updateContract(
+        bytes32[] memory jobHashes,
         address[] memory _workers,
-        uint256[] memory _workerCapacities,
+        uint256[] memory _capacities,
         uint256 _totalCapacity,
-        address[] memory _validatorsVoted,
-        uint256 additionalReward
+        address[] memory _validatorsVoted
     ) external;
     function getJobValidators(
         uint256 jobId

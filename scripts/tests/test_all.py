@@ -158,6 +158,7 @@ def main():
         job_capacities,
         workers,
         [sum(job_capacities)],
+        [80],
         {"from": account}
     )
 

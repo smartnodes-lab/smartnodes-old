@@ -95,15 +95,15 @@ def main():
     sno_multisig = deploy_smartnodesValidator(account, proxy_admin)
 
     # Un-comment to access existing contracts instead
-    # smartnodes_multisig_address = os.getenv("SMARTNODES_MULTISIG_ADDRESS")
-    # sno_multisig = Contract.from_abi("SmartnodesMultiSig", smartnodes_multisig_address, SmartnodesMultiSig.abi)
-    # smartnodes_address = os.getenv("SMARTNODES_ADDRESS")
-    # sno = Contract.from_abi("SmartnodesCore", smartnodes_address, SmartnodesCore.abi)
+    smartnodes_multisig_address = os.getenv("SMARTNODES_MULTISIG_ADDRESS")
+    sno_multisig = Contract.from_abi("SmartnodesMultiSig", smartnodes_multisig_address, SmartnodesMultiSig.abi)
+    smartnodes_address = os.getenv("SMARTNODES_ADDRESS")
+    sno = Contract.from_abi("SmartnodesCore", smartnodes_address, SmartnodesCore.abi)
     
     seed_validators = [account, "0xA9c5307090c4F7d98541C7a444f1C395F2d7e135"]
 
     initialize_contracts(account, seed_validators, sno, sno_multisig)
-    
+
     SmartnodesCore.publish_source(sno)
     SmartnodesMultiSig.publish_source(sno_multisig)
 
@@ -147,7 +147,7 @@ def main():
         job_hashes,
         job_capacities,
         workers,
-        [sum(job_capacities)],
+        [ (job_capacities)],
         {"from": account}
     )
 
