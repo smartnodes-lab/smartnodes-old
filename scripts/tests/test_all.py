@@ -24,36 +24,13 @@ def hash_proposal_data(
     job_capacities, 
     workers
 ):
-    total_capacity = sum(job_capacities)
     encoded_data = encode(
-        ["address[]", "bytes32[]", "uint256[]", "address[]", "uint256"],
+        ["address[]", "bytes32[]", "uint256[]", "address[]"],
         [
             validators_to_remove,
             job_hashes,
             job_capacities,
-            workers,
-            total_capacity
-        ]
-    )
-
-    return Web3.keccak(encoded_data)
-
-
-def hash_proposal_data(
-    validators_to_remove, 
-    job_hashes, 
-    job_capacities, 
-    workers
-):
-    total_capacity = sum(job_capacities)
-    encoded_data = encode(
-        ["address[]", "bytes32[]", "uint256[]", "address[]", "uint256"],
-        [
-            validators_to_remove,
-            job_hashes,
-            job_capacities,
-            workers,
-            total_capacity
+            workers
         ]
     )
 
@@ -110,7 +87,8 @@ def initialize_contracts(account, genesis_accounts, core, multisig):
 
 def main():
     # Account to deploy the proxy (proxy admin, to become a DAO of sorts)
-    account = accounts[0]
+    ganache_account = accounts[0]
+    ganache_account.transfer("0x560fd8449ebadafe8168a560f656148f655459ca", "1 ether")
 
     proxy_admin = deploy_proxy_admin(account)
     sno = deploy_smartnodes(account, proxy_admin)
@@ -131,7 +109,6 @@ def main():
     print(f"Validator: {sno.validators(account.address)}")
     print(f"Multisig State: {sno_multisig.getState()}")
     print(f"Outstanding Tokens: {sno.totalSupply()/1e18}\n\n")
-    print(sno_multisig.lastProposalTime.call())
 
     job_hashes = [
         bytes.fromhex(hashlib.sha256(str(random.random()).encode()).hexdigest()),
@@ -146,7 +123,7 @@ def main():
 
     for i in range(100):
         job_capacities.append(int(1e9))
-        workers.append(account.address)
+        workers.append("0x560fd8449ebadafe8168a560f656148f655459ca")
 
     sno_multisig.createProposal(
         hash_proposal_data([], job_hashes, job_capacities, workers), {"from": account}
@@ -157,8 +134,8 @@ def main():
         job_hashes,
         job_capacities,
         workers,
-        [sum(job_capacities)],
-        [80],
+        [4e9],
+        [1],
         {"from": account}
     )
 
@@ -170,30 +147,35 @@ def main():
     print(f"Outstanding Tokens: {sno.totalSupply()/1e18}\n\n")
     print(sno_multisig.lastProposalTime.call())
 
-    sno_multisig.createProposal(
-        hash_proposal_data([], job_hashes, job_capacities, workers), {"from": account}
-    )
-    sno_multisig.approveTransaction(1, {"from": account})
-    sno_multisig.executeProposal(
-        [],
-        job_hashes,
-        job_capacities,
-        workers,
-        [sum(job_capacities)],
-        {"from": account}
-    )
+    network.web3.provider.make_request("evm_mine", [])
 
-    print("\n_________________Contract State_________________\n")
-    print(f"Validator: {sno.validators(account.address)}")
-    print(f"Multisig State: {sno_multisig.getState()}")
-    print(f"Outstanding Tokens: {sno.totalSupply()/1e18}\n\n")
-    print(sno_multisig.lastProposalTime.call())
+    sno.claimRewards({'from': account})
 
-    sno.unlockTokens(10e18, {"from": account})
+    # sno_multisig.createProposal(
+    #     hash_proposal_data([], job_hashes, job_capacities, workers), {"from": account}
+    # )
+    # sno_multisig.approveTransaction(1, {"from": account})
+    # sno_multisig.executeProposal(
+    #     [],
+    #     job_hashes,
+    #     job_capacities,
+    #     workers,
+    #     [sum(job_capacities)],
+    #     [1],
+    #     {"from": account}
+    # )
 
-    print("\n_________________Final Contract State_________________\n")
-    print(f"Validator: {sno.validators(account.address)}")
-    print(f"Multisig State: {sno_multisig.getState()}")
-    print(f"Outstanding Tokens: {sno.totalSupply()/1e18}")
+    # print("\n_________________Contract State_________________\n")
+    # print(f"Validator: {sno.validators(account.address)}")
+    # print(f"Multisig State: {sno_multisig.getState()}")
+    # print(f"Outstanding Tokens: {sno.totalSupply()/1e18}\n\n")
+    # print(sno_multisig.lastProposalTime.call())
+
+    # sno.unlockTokens(10e18, {"from": account})
+
+    # print("\n_________________Final Contract State_________________\n")
+    # print(f"Validator: {sno.validators(account.address)}")
+    # print(f"Multisig State: {sno_multisig.getState()}")
+    # print(f"Outstanding Tokens: {sno.totalSupply()/1e18}")
     
-    network.web3.provider.make_request("evm_mine", [])
+    # network.web3.provider.make_request("evm_mine", [])

@@ -44,8 +44,9 @@ def deploy_new_validator(account, proxy_admin):
 
 
 def main():
-    account = accounts[0]
+    # account = accounts[0]
+
     # Account to deploy the proxy (proxy admin, to become a DAO of sorts)
     proxy_admin = get_proxy_admin()    
     sno = deploy_new_smartnodes(account, proxy_admin)
-    # sno_multisig = deploy_new_validator(account, proxy_admin)
+    sno_multisig = deploy_new_validator(account, proxy_admin)

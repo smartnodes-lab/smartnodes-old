@@ -13,8 +13,8 @@ import "./interfaces/ISmartnodesCore.sol";
 */
 contract SmartnodesMultiSig is Initializable, ReentrancyGuardUpgradeable {
     // State update constraints
-    uint256 public updateTime = 1800; // 30 minutes minimum required between state updates
-    uint256 public roundExpirationTime = 3600; // 60 minutes until proposal expires
+    uint256 public updateTime;
+    uint256 public roundExpirationTime;
     uint256 public requiredApprovalsPercentage;
     uint256 public requiredApprovals;
     uint256 public lastProposalTime; // time of last executed proposal
@@ -71,13 +71,13 @@ contract SmartnodesMultiSig is Initializable, ReentrancyGuardUpgradeable {
             "Not eligible to submit proposal."
         );
 
-        require(
-            hasSubmittedProposal[msg.sender] == 0,
-            "Validator has already submitted a proposal this round."
-        );
-
         if (_isRoundExpired) {
             _cleanupExpiredRound();
+        } else {
+            require(
+                hasSubmittedProposal[msg.sender] == 0,
+                "Validator has already submitted a proposal this round."
+            );
         }
 
         _;
@@ -96,10 +96,10 @@ contract SmartnodesMultiSig is Initializable, ReentrancyGuardUpgradeable {
         initializer
     {
         smartnodesContractAddress = target;
-        updateTime = 1800;
-        roundExpirationTime = 3600; // 1 hour until proposal expires
         _smartnodesContractInstance = ISmartnodesCore(target);
 
+        updateTime = 1800; // 30 minutes minimum required between state updates
+        roundExpirationTime = 3600; // 60 minutes until proposal expires
         lastProposalTime = 0;
         requiredApprovalsPercentage = 66;
         nValidators = 1;
@@ -174,7 +174,9 @@ contract SmartnodesMultiSig is Initializable, ReentrancyGuardUpgradeable {
      * @param proposalNum The ID of the current round proposal
      */
     function approveTransaction(uint8 proposalNum) external onlyValidator {
-        require(hasVoted[msg.sender] == 0, "Validator has already voted!");
+        if (!_isCurrentRoundExpired()) {
+            require(hasVoted[msg.sender] == 0, "Validator has already voted!");
+        }
         require(
             currentProposals.length >= proposalNum && proposalNum > 0,
             "Invalid proposal number!"
@@ -200,8 +202,8 @@ contract SmartnodesMultiSig is Initializable, ReentrancyGuardUpgradeable {
         bytes32[] memory jobHashes,
         uint256[] memory jobCapacities,
         address[] memory jobWorkers,
-        uint256[] memory totalCapacities,
-        uint256[] memory totalWorkers
+        uint256[] memory allCapacities,
+        uint256[] memory allWorkers
     ) external onlyValidator {
         uint8 proposalNum = hasSubmittedProposal[msg.sender];
         require(proposalNum > 0, "Must be a proposal creator!");
@@ -210,19 +212,12 @@ contract SmartnodesMultiSig is Initializable, ReentrancyGuardUpgradeable {
             "Not enough proposal votes!"
         );
 
-        // totalCapacities contains total capacities of each network, we must summate them
-        uint256 totalCapacity = 0;
-        for (uint i = 0; i < totalCapacities.length; i++) {
-            totalCapacity += totalCapacities[i];
-        }
-
         bytes32 providedHash = currentProposals[proposalNum - 1];
         bytes32 proposalHash = hashProposalData(
             validatorsToRemove,
             jobHashes,
             jobCapacities,
-            jobWorkers,
-            totalCapacity
+            jobWorkers
         );
 
         require(
@@ -248,12 +243,15 @@ contract SmartnodesMultiSig is Initializable, ReentrancyGuardUpgradeable {
             }
         }
 
+        uint256 activeValidators = validators.length;
+
         // Call mint function to generate rewards for workers and validators
         _smartnodesContractInstance.updateContract(
             jobHashes,
             jobWorkers,
             jobCapacities,
-            totalCapacity,
+            allCapacities,
+            allWorkers,
             _approvedValidators
         );
 
@@ -266,8 +264,7 @@ contract SmartnodesMultiSig is Initializable, ReentrancyGuardUpgradeable {
         address[] memory validatorsToRemove,
         bytes32[] memory jobHashes,
         uint256[] memory jobCapacities,
-        address[] memory workers,
-        uint256 totalCapacity
+        address[] memory workers
     ) public pure returns (bytes32) {
         require(
             workers.length == jobCapacities.length,
@@ -280,8 +277,7 @@ contract SmartnodesMultiSig is Initializable, ReentrancyGuardUpgradeable {
                     validatorsToRemove,
                     jobHashes,
                     jobCapacities,
-                    workers,
-                    totalCapacity
+                    workers
                 )
             );
     }
@@ -510,5 +506,9 @@ contract SmartnodesMultiSig is Initializable, ReentrancyGuardUpgradeable {
         }
 
         return false;
+    }
+
+    function getUpdateTime() external view returns (uint256) {
+        return updateTime;
     }
 }

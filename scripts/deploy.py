@@ -23,15 +23,13 @@ def hash_proposal_data(
     job_capacities, 
     workers
 ):
-    total_capacity = sum(job_capacities)
     encoded_data = encode(
-        ["address[]", "bytes32[]", "uint256[]", "address[]", "uint256"],
+        ["address[]", "bytes32[]", "uint256[]", "address[]"],
         [
             validators_to_remove,
             job_hashes,
             job_capacities,
-            workers,
-            total_capacity
+            workers
         ]
     )
 
@@ -60,6 +58,7 @@ def deploy_smartnodes(account, proxy_admin):
     smartnodes_address = sno_proxy.address
 
     set_key(".env", "SMARTNODES_ADDRESS", smartnodes_address)    
+    set_key(".env", "SMARTNODES_STORAGE_ADDRESS", sno.address)    
     return sno_proxy
 
 
@@ -77,6 +76,7 @@ def deploy_smartnodesValidator(account, proxy_admin):
     sno_multisig_proxy = Contract.from_abi("SmartnodesMultiSig", sno_multisig_proxy.address, SmartnodesMultiSig.abi)
     smartnodes_multisig_address = sno_multisig_proxy.address
     set_key(".env", "SMARTNODES_MULTISIG_ADDRESS", smartnodes_multisig_address)
+    set_key(".env", "SMARTNODES_MULTISIG_STORAGE_ADDRESS", sno_multisig.address)
     return sno_multisig_proxy
 
 
@@ -90,31 +90,35 @@ def main():
     # account = accounts[0]
 
     # Account to deploy the proxy (proxy admin, to become a DAO of sorts)
-    proxy_admin = deploy_proxy_admin(account)    
-    sno = deploy_smartnodes(account, proxy_admin)
-    sno_multisig = deploy_smartnodesValidator(account, proxy_admin)
+    # proxy_admin = deploy_proxy_admin(account)    
+    # sno = deploy_smartnodes(account, proxy_admin)
+    # sno_multisig = deploy_smartnodesValidator(account, proxy_admin)
 
     # Un-comment to access existing contracts instead
     smartnodes_multisig_address = os.getenv("SMARTNODES_MULTISIG_ADDRESS")
     sno_multisig = Contract.from_abi("SmartnodesMultiSig", smartnodes_multisig_address, SmartnodesMultiSig.abi)
     smartnodes_address = os.getenv("SMARTNODES_ADDRESS")
     sno = Contract.from_abi("SmartnodesCore", smartnodes_address, SmartnodesCore.abi)
-    
+
     seed_validators = [account, "0xA9c5307090c4F7d98541C7a444f1C395F2d7e135"]
 
-    initialize_contracts(account, seed_validators, sno, sno_multisig)
+    # smartnodes_impl_address = os.getenv("SMARTNODES_STORAGE_ADDRESS")
+    # smartnodes_multisig_impl_address = os.getenv("SMARTNODES_MULTISIG_STORAGE_ADDRESS")
 
-    SmartnodesCore.publish_source(sno)
-    SmartnodesMultiSig.publish_source(sno_multisig)
+    # sno_impl = Contract.from_abi("SmartnodesCore", smartnodes_impl_address, SmartnodesCore.abi)
+    # sno_multisig_impl = Contract.from_abi("SmartnodesMultiSig", smartnodes_multisig_impl_address, SmartnodesMultiSig.abi)
+
+    # SmartnodesCore.publish_source(sno_impl)
+    # SmartnodesMultiSig.publish_source(sno_multisig_impl)
 
     # Optionally, add account as validator
-    sno.approve(account, 500_000e18, {"from": account})
-    sno.createValidator(
-        os.getenv("NODE_HASH"),
-        500_000e18,
-        {"from": account}
-    )
-    sno_multisig.addValidator(account, {"from": account})
+    # sno.approve(account, 500_000e18, {"from": account})
+    # sno.createValidator(
+    #     os.getenv("NODE_HASH"),
+    #     500_000e18,
+    #     {"from": account}
+    # )
+    # sno_multisig.addValidator(account, {"from": account})
 
 
     print("\n_________________Contract State_________________")
@@ -122,18 +126,12 @@ def main():
     print(f"Multisig State: {sno_multisig.getState()}")
     print(f"Outstanding Tokens: {sno.totalSupply()/1e18}\n\n")
     
-    job_hashes = [
-        bytes.fromhex(hashlib.sha256(str(random.random()).encode()).hexdigest()),
-        bytes.fromhex(hashlib.sha256(str(random.random()).encode()).hexdigest()),
-        bytes.fromhex(hashlib.sha256(str(random.random()).encode()).hexdigest()),
-        bytes.fromhex(hashlib.sha256(str(random.random()).encode()).hexdigest()),
-        bytes.fromhex(hashlib.sha256(str(random.random()).encode()).hexdigest()),
-        bytes.fromhex(hashlib.sha256(str(random.random()).encode()).hexdigest())
-    ]
+    job_hashes = []
     job_capacities = []
     workers = []
 
-    for i in range(100):
+    for i in range(1):
+        job_hashes.append(bytes.fromhex(hashlib.sha256(str(random.random()).encode()).hexdigest()))
         job_capacities.append(int(1e9))
         workers.append(account.address)
 
@@ -147,7 +145,8 @@ def main():
         job_hashes,
         job_capacities,
         workers,
-        [ (job_capacities)],
+        [sum(job_capacities)],
+        [1],
         {"from": account}
     )
 
@@ -155,4 +154,3 @@ def main():
     print(f"Validator: {sno.validators(account.address)}")
     print(f"Multisig State: {sno_multisig.getState()}")
     print(f"Outstanding Tokens: {sno.totalSupply()/1e18}\n\n")
-

@@ -15,10 +15,11 @@ interface ISmartnodesCore {
     function unlockTokens(uint256 amount) external;
     function updateContract(
         bytes32[] memory jobHashes,
-        address[] memory _workers,
-        uint256[] memory _capacities,
-        uint256 _totalCapacity,
-        address[] memory _validatorsVoted
+        address[] memory workers,
+        uint256[] memory capacities,
+        uint256[] memory allCapacities,
+        uint256[] memory allWorkers,
+        address[] memory validatorsVoted
     ) external;
     function getJobValidators(
         uint256 jobId

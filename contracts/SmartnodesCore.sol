@@ -15,7 +15,6 @@ contract SmartnodesCore is
 {
     error InsufficientBalance();
     error InvalidAmount();
-    error InvalidCapacity();
     error InvalidLength();
     error NoValidators();
     error NoRewards();
@@ -33,18 +32,20 @@ contract SmartnodesCore is
     uint256 public constant UNLOCK_PERIOD = 1_209_600; // 14 days in seconds
     uint256 public constant VALIDATOR_REWARD_PERCENTAGE = 20;
     uint256 public constant INITIAL_LOCK_AMOUNT = 500_000e18;
-    uint256 public constant INITIAL_EMISSION_RATE = 2048e18;
-    uint256 public constant MIN_STATE_UPDATE_INTERVAL = 1 hours;
+    uint256 public constant INITIAL_EMISSION_RATE = 4096e18;
 
-    uint256 public halvingPeriod = 8742; // 364.25 * 24
-    uint256 public tailEmission = 64e18;
+    uint256 public halvingPeriod;
+    uint256 public tailEmission;
     uint256 public emissionRate;
     uint256 public statesSinceLastHalving;
     uint256 public totalLocked;
+    uint256 public totalUnclaimed;
     uint256 public jobCounter;
     uint24 public validatorCounter;
+    uint64 public userCounter;
     uint256 public lockAmount;
     uint256 public lastStateUpdateTimestamp;
+    uint8 public halvingCounter;
 
     struct Validator {
         uint256 locked;
@@ -76,13 +77,9 @@ contract SmartnodesCore is
     event JobCancelled(bytes32 indexed jobHash, address indexed requester);
     event RewardsClaimed(address indexed sender, uint256 amount);
     event StateUpdate(
+        uint256[] networkWorkers,
         uint256[] networkCapacities,
-        uint64 activeWorkers,
-        uint64 activeValidators,
-        uint64 activeUsers,
-        uint64 activeJobs,
-        uint64 numWorkers,
-        uint64 numValidators,
+        uint24 activeValidators,
         uint64 numUsers
     );
     event EmissionRateUpdated(uint256 newRate);
@@ -100,16 +97,6 @@ contract SmartnodesCore is
         _;
     }
 
-    modifier ensureStateUpdateInterval() {
-        if (
-            block.timestamp <
-            lastStateUpdateTimestamp + MIN_STATE_UPDATE_INTERVAL
-        ) {
-            revert StateUpdateTooFrequent();
-        }
-        _;
-    }
-
     function initialize(address[] memory _genesisNodes) external initializer {
         __ERC20_init("Smartnodes", "SNO");
         __ReentrancyGuard_init();
@@ -119,9 +106,12 @@ contract SmartnodesCore is
         proxyAdmin = msg.sender;
         emissionRate = INITIAL_EMISSION_RATE;
         lockAmount = INITIAL_LOCK_AMOUNT;
+        halvingPeriod = 8742; // 364.25 * 24
+        tailEmission = 128e18;
 
         jobCounter = 1;
         validatorCounter = 1;
+        userCounter = 1;
         lastStateUpdateTimestamp = 1;
 
         for (uint i = 0; i < _genesisNodes.length; ) {
@@ -139,7 +129,6 @@ contract SmartnodesCore is
         uint256[] calldata capacities,
         uint256 paymentAmount
     ) external whenNotPaused {
-        if (capacities.length == 0) revert InvalidCapacity();
         if (paymentAmount == 0) revert InvalidAmount();
         if (balanceOf(msg.sender) < paymentAmount) revert InsufficientBalance();
         if (jobs[jobHash].exists) revert("Job already exists");
@@ -178,50 +167,70 @@ contract SmartnodesCore is
         bytes32 jobHash
     ) public onlyValidatorMultiSig whenNotPaused returns (uint256) {
         Job memory job = jobs[jobHash];
-        if (!job.exists) return 0;
-
         uint256 totalReward = job.payment;
-        delete jobs[jobHash];
 
         emit JobCompleted(jobHash, totalReward);
+        jobCounter += 1;
+
+        if (!job.exists) return 0;
+
+        delete jobs[jobHash];
+
         return totalReward;
     }
 
     function updateContract(
         bytes32[] memory jobHashes,
-        address[] memory _workers,
-        uint256[] memory _capacities,
-        uint256 _totalCapacity,
-        address[] memory _validatorsVoted
-    )
-        external
-        onlyValidatorMultiSig
-        nonReentrant
-        ensureStateUpdateInterval
-        whenNotPaused
-    {
-        if (_workers.length != _capacities.length) revert InvalidLength();
-        if (_validatorsVoted.length == 0) revert NoValidators();
-        if (_totalCapacity == 0 && _workers.length > 0)
-            revert InvalidCapacity();
+        address[] memory workers,
+        uint256[] memory capacities,
+        uint256[] memory allCapacities,
+        uint256[] memory allWorkers,
+        address[] memory validatorsVoted
+    ) external onlyValidatorMultiSig nonReentrant whenNotPaused {
+        if (workers.length != capacities.length) revert InvalidLength();
+        if (validatorsVoted.length == 0) revert NoValidators();
 
         // Update emission rate if needed
         if (statesSinceLastHalving >= halvingPeriod) {
             if (emissionRate > tailEmission) {
                 emissionRate /= 2;
+                if (halvingCounter == 2) {
+                    halvingPeriod *= 2;
+                    halvingCounter = 3;
+                } else if (halvingCounter < 2) {
+                    halvingCounter++;
+                }
+
                 emit EmissionRateUpdated(emissionRate);
             }
             statesSinceLastHalving = 0;
         }
 
+        // allCapacities contains total capacities of each network, we must summate them
+        uint256 totalCapacity = 0;
+        for (uint i = 0; i < allCapacities.length; i++) {
+            totalCapacity += allCapacities[i];
+        }
+
+        uint256 totalWorkers = 0;
+        for (uint i = 0; i < allWorkers.length; i++) {
+            totalWorkers += allWorkers[i];
+        }
+
         // Process rewards
         uint256 additionalReward = _processCompletedJobs(jobHashes);
         _distributeRewards(
-            _workers,
-            _capacities,
-            _totalCapacity,
-            _validatorsVoted,
+            workers,
+            capacities,
+            validatorsVoted,
             additionalReward
+        );
+
+        emit StateUpdate(
+            allWorkers,
+            allCapacities,
+            validatorCounter - 1,
+            userCounter - 1
         );
 
         unchecked {
@@ -245,7 +254,6 @@ contract SmartnodesCore is
     function _distributeRewards(
         address[] memory _workers,
         uint256[] memory _capacities,
-        uint256 _totalCapacity,
         address[] memory _validatorsVoted,
         uint256 additionalReward
     ) internal {
@@ -260,10 +268,12 @@ contract SmartnodesCore is
             workerReward = totalReward - validatorReward;
         }
 
+        totalUnclaimed += totalReward;
+
         // Distribute validator rewards
         if (_validatorsVoted.length > 0) {
             uint256 validatorShare = validatorReward / _validatorsVoted.length;
-            for (uint256 i = 0; i < _validatorsVoted.length; ) {
+            for (uint256 i = 0; i < _validatorsVoted.length; i++) {
                 unclaimedRewards[_validatorsVoted[i]] += validatorShare;
                 unchecked {
                     ++i;
@@ -273,13 +283,24 @@ contract SmartnodesCore is
 
         // Distribute worker rewards
         if (_workers.length > 0) {
-            for (uint256 i = 0; i < _workers.length; ) {
+            uint256 _totalCapacity = 0;
+
+            // First pass: Calculate total capacity
+            for (uint256 i = 0; i < _workers.length; i++) {
+                _totalCapacity += _capacities[i];
+            }
+
+            // Ensure total capacity is greater than zero to avoid division by zero
+            require(
+                _totalCapacity > 0,
+                "Total capacity must be greater than 0"
+            );
+
+            // Second pass: Distribute rewards
+            for (uint256 i = 0; i < _workers.length; i++) {
                 uint256 reward = (_capacities[i] * workerReward) /
                     _totalCapacity;
                 unclaimedRewards[_workers[i]] += reward;
-                unchecked {
-                    ++i;
-                }
             }
         }
     }
@@ -289,6 +310,7 @@ contract SmartnodesCore is
         if (amount == 0) revert NoRewards();
 
         unclaimedRewards[msg.sender] = 0;
+        totalUnclaimed -= amount;
         _mint(msg.sender, amount);
 
         emit RewardsClaimed(msg.sender, amount);
@@ -385,6 +407,13 @@ contract SmartnodesCore is
         return unclaimedRewards[user];
     }
 
+    function getLockedBalance(
+        address validatorAddress
+    ) external view returns (uint256) {
+        Validator memory validator = validators[validatorAddress];
+        return validator.locked;
+    }
+
     function getActiveValidatorCount() external view returns (uint256) {
         return validatorContract.getNumValidators();
     }
@@ -403,6 +432,10 @@ contract SmartnodesCore is
             "Validator address already set."
         );
         validatorContract = ISmartnodesMultiSig(_validatorAddress);
+    }
+
+    function getSupply() external view returns (uint256, uint256, uint256) {
+        return (this.totalSupply(), totalLocked, totalUnclaimed);
     }
 
     function halveStateTime() external onlyProxyAdmin {
